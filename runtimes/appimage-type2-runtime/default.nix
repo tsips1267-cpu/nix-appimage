@@ -52,11 +52,6 @@ stdenv.mkDerivation {
 
   patchPhase = ''
     sed -e '/sqfs_usage/s/);/, true\0/' -i src/runtime/runtime.c
-
-    # musl's nftw does nothing when fd_limit is 0, so --appimage-extract-and-run
-    # never cleaned up the extracted files
-    sed -e 's/nftw(path, &rm_recursive_callback, 0,/nftw(path, \&rm_recursive_callback, 64,/' -i src/runtime/runtime.c
-    grep -q 'nftw(path, &rm_recursive_callback, 64,' src/runtime/runtime.c
   '';
 
   configurePhase = ''
