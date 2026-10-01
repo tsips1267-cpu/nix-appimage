@@ -251,8 +251,8 @@ static void bind_entries(const char* from_dir, const char* to_dir, const char* c
 //   than glibc and each other) are added to the cache too. These come from
 //   the bundled host-driver-deps.
 //
-// If the host already has /run/opengl-driver (e.g. it's NixOS), that's used
-// instead, since those drivers are already set up to work with nix programs.
+// We do this even if the host has its own /run/opengl-driver (e.g. it's NixOS),
+// since that points into the host's /nix/store, which we hide.
 
 #define DRIVER_LINK "/run/opengl-driver"
 
@@ -708,33 +708,35 @@ void child_main(char** argv)
 	gid_t gid = getgid();
 
 	struct graphics_config graphics = { 0 };
-	struct stat statbuf;
-	bool provide_graphics = read_graphics_config(&graphics) && lstat(DRIVER_LINK, &statbuf) < 0;
+	bool provide_graphics = read_graphics_config(&graphics);
 
-	int clonens = CLONE_NEWNS;
-	if (uid != 0) {
-		// create new user ns so we can mount() in userland
-		clonens |= CLONE_NEWUSER;
+	// Create new mount namespace, and a user namespace unless we're root (so that
+	// we can mount() in userland)
+	bool userns = uid != 0;
+	if (!userns && unshare(CLONE_NEWNS) < 0) {
+		// we're root without CAP_SYS_ADMIN (e.g. in a container), so do the same
+		// as for other users
+		die_if(errno != EPERM, "cannot unshare");
+		userns = true;
 	}
 
-	// Create new mount namespace (and potentially user namespace if not root)
-	die_if(unshare(clonens) < 0, "cannot unshare");
+	if (userns) {
+		die_if(unshare(CLONE_NEWNS | CLONE_NEWUSER) < 0, "cannot unshare");
 
-	if (uid != 0) {
 		// UID/GID Mapping -----------------------------------------------------------
 
 		// see user_namespaces(7)
 		// > The data written to uid_map (gid_map) must consist of a single line that
 		// > maps the writing process's effective user ID (group ID) in the parent
 		// > user namespace to a user ID (group ID) in the user namespace.
-		die_if(write_to("/proc/self/uid_map", "%d %d 1\n", uid, uid), "cannot write uid_map");
+		die_if(write_to("/proc/self/uid_map", "%u %u 1\n", uid, uid), "cannot write uid_map");
 
 		// see user_namespaces(7):
 		// > In the case of gid_map, use of the setgroups(2) system call must first
 		// > be denied by writing "deny" to the /proc/[pid]/setgroups file (see
 		// > below) before writing to gid_map.
 		die_if(write_to("/proc/self/setgroups", "deny"), "cannot write setgroups");
-		die_if(write_to("/proc/self/gid_map", "%d %d 1\n", gid, gid), "cannot write gid_map");
+		die_if(write_to("/proc/self/gid_map", "%u %u 1\n", gid, gid), "cannot write gid_map");
 	}
 
 	// Mountpoint ----------------------------------------------------------------
@@ -742,14 +744,21 @@ void child_main(char** argv)
 	// Stop our mounts from propagating back to the host's mount namespace, while
 	// still seeing the host's new mounts (e.g. a USB drive being plugged in).
 	// This already happens if we created a user namespace, but not as root.
-	// EINVAL means / isn't a mount point (e.g. we're in a chroot), which we can't
-	// do anything about.
-	if (mount("none", "/", 0, MS_REC | MS_SLAVE, 0) < 0 && errno != EINVAL) {
-		warn("cannot make mounts slaves");
+	//
+	// EINVAL means / isn't a mount point (e.g. we're in a chroot). All our mounts
+	// are under appdir, so it's enough to do this for that instead, though it's
+	// only a mount point if the runtime mounted the AppImage rather than
+	// extracting it.
+	if (mount("none", "/", 0, MS_REC | MS_SLAVE, 0) < 0) {
+		if (errno != EINVAL) {
+			warn("cannot make mounts slaves");
+		} else if (mount("none", appdir, 0, MS_REC | MS_SLAVE, 0) < 0 && errno != EINVAL) {
+			warn("cannot make %s a slave mount", appdir);
+		}
 	}
 
 	// tmpfs so we don't need to cleanup
-	die_if(mount("tmpfs", mountroot, "tmpfs", 0, 0) < 0, "mount tmpfs -> %s", mountroot);
+	die_if(mount("tmpfs", mountroot, "tmpfs", 0, "mode=755") < 0, "mount tmpfs -> %s", mountroot);
 	// make unbindable to both prevent event propagation as well as mount explosion
 	die_if(mount(mountroot, mountroot, "none", MS_UNBINDABLE, 0) < 0, "mount tmpfs bind -> %s", mountroot);
 
@@ -764,7 +773,8 @@ void child_main(char** argv)
 		const char* run_to = strprintf("%s/run", mountroot);
 		die_if(mkdir(run_to, 0755) < 0, "mkdir %s", run_to);
 		die_if(mount("tmpfs", run_to, "tmpfs", 0, "mode=755") < 0, "mount tmpfs -> %s", run_to);
-		bind_entries("/run", run_to, NULL);
+		const char* const run_skip[] = { "opengl-driver", NULL };
+		bind_entries("/run", run_to, run_skip);
 		free((void*) run_to);
 	}
 
@@ -778,11 +788,18 @@ void child_main(char** argv)
 	free((void*) nix_from);
 	free((void*) nix_to);
 
+	// Writes to the root would otherwise silently go to our tmpfs. This doesn't
+	// affect the mounts within it.
+	die_if(mount(mountroot, mountroot, "none", MS_REMOUNT | MS_BIND | MS_RDONLY, 0) < 0, "cannot make %s read-only", mountroot);
+
 	// Change root ---------------------------------------------------------------
 
 	// save where we were so we can cd into it
-	char cwd[PATH_MAX];
-	die_if(!getcwd(cwd, PATH_MAX), "cannot getcwd");
+	char cwd_buf[PATH_MAX];
+	const char* cwd = getcwd(cwd_buf, PATH_MAX);
+	if (!cwd) {
+		warn("cannot getcwd");
+	}
 
 	// Use pivot_root rather than chroot, since the kernel doesn't let chrooted
 	// processes create user namespaces, which e.g. bwrap and Chromium's sandbox
@@ -798,8 +815,18 @@ void child_main(char** argv)
 		die_if(chroot(mountroot) < 0, "cannot chroot %s", mountroot);
 	}
 
-	// cd back again
-	die_if(chdir(cwd) < 0, "cannot chdir %s", cwd);
+	// cd back again. This can fail even though we were there, e.g. if it's been
+	// deleted, or we can't access it (e.g. `sudo -u user` from a directory only
+	// root can access), in which case fall back to $HOME or / like bwrap does.
+	if (!cwd || chdir(cwd) < 0) {
+		if (cwd) {
+			warn("cannot chdir %s", cwd);
+		}
+		const char* home = getenv("HOME");
+		if (!home || chdir(home) < 0) {
+			die_if(chdir("/") < 0, "cannot chdir /");
+		}
+	}
 
 	// Graphics ------------------------------------------------------------------
 

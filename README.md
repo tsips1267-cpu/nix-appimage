@@ -6,20 +6,20 @@ Like [nix-bundle](https://github.com/matthewbauer/nix-bundle), but much faster a
 ## Getting started
 
 To use this, you will need to have [Nix](https://nixos.org/) available.
-Then, run this via the [nix bundle](https://nixos.org/manual/nix/unstable/command-ref/new-cli/nix3-bundle.html) interface, replacing `nixpkgs.hello` with the flake you want to build:
+Then, run this via the [nix bundle](https://nixos.org/manual/nix/unstable/command-ref/new-cli/nix3-bundle.html) interface, replacing `nixpkgs#hello` with the flake you want to build:
 
 ```
 $ nix bundle --bundler github:ralismark/nix-appimage nixpkgs#hello
 ```
 
-This produces `hello.AppImage`, which prints "Hello world!" when run:
+This produces `hello.AppImage`, which prints "Hello, world!" when run:
 
 ```
 $ ./hello.AppImage
 Hello, world!
 ```
 
-If you get a `entrypoint ... is not executable` error, or want to specify a different binary to run, you can instead use the `./bundle` script:
+If you get an `entrypoint ... is not an executable file` error, or want to specify a different binary to run, you can instead use the `./bundle` script:
 
 ```
 $ ./bundle dnsutils /bin/dig # or ./bundle dnsutils dig
@@ -37,9 +37,9 @@ Programs that use the GPU work out of the box on other distros, without needing 
 Normally this is a [known problem](https://github.com/NixOS/nixpkgs/issues/9415): nix-built programs look for GPU drivers in `/run/opengl-driver`, which only exists on NixOS.
 To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering), and AppRun provides it at `/run/opengl-driver` when the host doesn't have one.
 NVIDIA's proprietary driver can't be bundled, since it has to match the host's kernel module, so if the host has it installed, AppRun makes the host's NVIDIA libraries available to the bundled program as well.
-If the host already has `/run/opengl-driver` (e.g. it's NixOS), that's used as-is.
+This is also done on NixOS, since the host's `/run/opengl-driver` points into its `/nix/store`, which the AppImage replaces with its own (so on NixOS, the host's NVIDIA driver can't be used).
 
-By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan or GBM (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, etc), since they add roughly 100-150MB to the AppImage.
+By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan, GBM, VA-API or VDPAU (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, libva, etc), since they add roughly 100-150MB to the AppImage.
 Note that determining this still requires downloading the drivers when building.
 `mkAppImage` has options to control this:
 
@@ -50,6 +50,8 @@ Some things to be aware of:
 
 - Drivers get loaded into the bundled program, so they should come from a nixpkgs that is no newer than the program's, otherwise they may need a newer glibc than the program has.
   When using `mkAppImage` directly, you can pass `graphicsDrivers = [ pkgs.mesa ]` with the same `pkgs` as the program to avoid this.
+  On hosts with NVIDIA's driver, a few libraries from nix-appimage's nixpkgs also get loaded (see graphics/host-driver-deps.nix), which `mkAppImage.override { mkappimage-host-driver-deps = ...; }` can replace.
+- Programs that only use CUDA (rather than e.g. OpenGL) aren't detected, so need `graphics = true` to get access to the host's NVIDIA driver.
 - GPUs that are newer than the bundled Mesa may not be supported by it, in which case programs fall back to software rendering.
 - To add `/run/opengl-driver`, AppRun gives the program its own `/run` containing the host's `/run` entries as of startup.
   Entries created directly in the host's `/run` after that (or sockets like `/run/docker.sock` that get recreated when their daemon restarts) aren't visible to the program until it's restarted.
@@ -60,6 +62,8 @@ Some things to be aware of:
 
 We only make a best-effort attempt to copy in the relevant .desktop files and icons, so they may not be present.
 This doesn't affect the running of bundled apps, but might cause issues with showing up correctly in application launchers (e.g. rofi).
+
+Since the bundled app sees the AppImage's `/nix/store` instead of the host's, running an AppImage that is itself in the host's `/nix/store` (e.g. `./result`) means `$APPIMAGE` points to a file the app can't see, which matters for apps that relaunch themselves through it.
 
 The current implementation also requires unprivileged Linux User Namespaces, which are available since Linux 3.8 (released in 2013), but may not be enabled for security reasons.
 

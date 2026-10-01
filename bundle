@@ -27,7 +27,9 @@ if [ "${NA_EXE#/}" = "$NA_EXE" ]; then
 fi
 
 export NA_EXE
-nix bundle --impure --bundler "$(dirname "$0")" \
+# use an absolute path, since a relative one like nix-appimage would be taken as
+# a flake registry name
+nix bundle --impure --bundler "$(cd "$(dirname "$0")" && pwd)" \
 	--expr '
 	let
 		p = with import <nixpkgs> {}; '"$1"';

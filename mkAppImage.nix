@@ -15,7 +15,7 @@
 { program # absolute path of executable to start
 
   # output name
-, pname ? (lib.last (builtins.split "/" program))
+, pname ? (lib.last (builtins.split "/" (toString program)))
 , name ? "${pname}.AppImage"
 
   # graphics (OpenGL, EGL, Vulkan, GBM, VA-API, VDPAU) driver support
@@ -37,6 +37,10 @@ let
   commonArgs = [
     "-offset $(stat -L -c%s ${lib.escapeShellArg mkappimage-runtime})" # squashfs comes after the runtime
     "-all-root" # chown to root
+    # don't depend on the build machine's store, which may have hardlinked
+    # identical files (auto-optimise-store) or have SELinux labels
+    "-no-hardlinks"
+    "-no-xattrs"
   ] ++ squashfsArgs;
 
   # Workaround for writeClosure bug.
@@ -83,10 +87,15 @@ let
 
     # static libraries aren't used at runtime, and llvm's (which mesa depends
     # on) are a few hundred MB. Only exclude them from paths that are just
-    # there for the drivers, to not change what the program itself sees.
+    # there for the drivers, to not change what the program itself sees. This
+    # uses an action rather than -e, since that would depend on whether
+    # squashfsArgs has -wildcards or -regex, and without them excludes files by
+    # inode (so would also exclude hardlinked copies elsewhere).
     comm -13 closure-program closure-graphics | while read -r path; do
-      find "$path" -type f -name '*.a'
-    done >> excludes
+      if [ -n "$(find "$path" -type f -name '*.a' -print -quit)" ]; then
+        echo "exclude@subpathname(''${path#/}) && name(*.a) && type(f)"
+      fi
+    done >> actions
 
     mkdir extras/graphics
     ln -s ${graphicsDriversEnv} extras/graphics/drivers
@@ -110,12 +119,12 @@ let
   '';
 
   # Whether the program uses graphics drivers, by checking for the libraries
-  # that load them: libglvnd's libGL/libEGL/etc, vulkan-loader's libvulkan, and
-  # libgbm.
+  # that load them: libglvnd's libGL/libEGL/etc, vulkan-loader's libvulkan,
+  # libgbm, libva and libvdpau.
   detectGraphics = ''
     usesGraphics=
     while read -r path; do
-      for lib in libGL.so.1 libGLX.so.0 libEGL.so.1 libOpenGL.so.0 libGLESv2.so.2 libvulkan.so.1 libgbm.so.1; do
+      for lib in libGL.so.1 libGLX.so.0 libEGL.so.1 libOpenGL.so.0 libGLESv2.so.2 libvulkan.so.1 libgbm.so.1 libva.so.2 libvdpau.so.1; do
         if [ -e "$path/lib/$lib" ]; then
           echo "program uses $path/lib/$lib"
           usesGraphics=1
@@ -131,17 +140,17 @@ runCommand name
     squashfsTools
   ];
 } ''
-  if ! test -x ${program}; then
-    echo "entrypoint '${program}' is not executable"
+  if ! test -f ${lib.escapeShellArg program} -a -x ${lib.escapeShellArg program}; then
+    echo "entrypoint '${program}' is not an executable file"
     exit 1
   fi
 
-  ${./extra-files.sh} ${program}
+  ${./extra-files.sh} ${lib.escapeShellArg program}
 
   # the store paths to include
   cat ${writeReferencesToFile program} > closure
-  # additional mksquashfs pseudo file definitions and excluded files
-  touch pseudo excludes
+  # additional mksquashfs pseudo file definitions and actions
+  touch pseudo actions
 
   ${if graphics == "auto" then ''
     ${detectGraphics}
@@ -163,7 +172,7 @@ runCommand name
       "entrypoint s 555 0 0 ${program}"
     ])
     "-pf pseudo"
-    "-ef excludes"
+    "-action-file actions"
 
     "-no-strip" # don't strip leading dirs, to preserve the fact that everything's in the nix store
   ] ++ commonArgs)}

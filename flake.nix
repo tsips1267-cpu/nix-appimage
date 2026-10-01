@@ -18,16 +18,21 @@
         # bundled program (e.g. graphics drivers)
         pkgsDynamic = import nixpkgs { inherit system; };
         pkgs = pkgsDynamic.pkgsStatic;
+
+        # A derivation linking to each of attrs, which also has them as attributes.
+        # `nix flake check` requires packages to be derivations, but this keeps
+        # e.g. packages.<system>.appimage-runtimes.<name> working.
+        linkFarmWithAttrs = name: attrs: pkgsDynamic.linkFarm name attrs // attrs;
       in
       rec {
         # runtimes are an executable that mount the squashfs part of the appimage and start AppRun
-        packages.appimage-runtimes = {
+        packages.appimage-runtimes = linkFarmWithAttrs "appimage-runtimes" {
           appimagecrafters = pkgs.callPackage ./runtimes/appimagecrafters { };
           appimage-type2-runtime = pkgs.callPackage ./runtimes/appimage-type2-runtime { };
         };
 
         # appruns contain an AppRun executable that does setup and launches entrypoint
-        packages.appimage-appruns = {
+        packages.appimage-appruns = linkFarmWithAttrs "appimage-appruns" {
           userns-chroot = pkgs.callPackage ./appruns/userns-chroot { };
         };
 
