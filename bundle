@@ -2,11 +2,15 @@
 
 if [ "$#" -lt 2 ]; then
 	cat <<EOF
-Usage: $0 INSTALLABLE EXECUTABLE
+Usage: $0 PACKAGE EXECUTABLE
 
 This is an alternative to 'nix bundle' that allow specifying the executable to
 run. This is handy for derivations that haven't specified meta.mainProgram, or
 contain multiple programs.
+
+PACKAGE is a package in <nixpkgs> (i.e. the nixpkgs in your NIX_PATH), like
+dnsutils, or more generally a Nix expression with nixpkgs in scope. It's not a
+flake reference like nixpkgs#dnsutils.
 
 EXECUTABLE can be either an absolute path (relative to the derivation path), or
 a relative path (relative to the /bin subdirectory).
@@ -19,6 +23,13 @@ Example usage:
 EOF
 	exit 1
 fi
+
+case "$1" in
+*'#'*)
+	echo "$0: PACKAGE should be a package in <nixpkgs> like dnsutils, not a flake reference like nixpkgs#dnsutils" >&2
+	exit 1
+	;;
+esac
 
 NA_EXE="$2"
 if [ "${NA_EXE#/}" = "$NA_EXE" ]; then
@@ -35,6 +46,6 @@ nix bundle --impure --bundler "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)" \
 		p = with import <nixpkgs> {}; '"$1"';
 	in {
 		type = "app";
-		program = "${p}/${builtins.getEnv "NA_EXE"}";
+		program = "${p}${builtins.getEnv "NA_EXE"}";
 	}
 	'

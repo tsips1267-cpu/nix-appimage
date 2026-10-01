@@ -11,11 +11,22 @@
 , mkappimage-host-driver-deps # libraries that the host's NVIDIA driver needs, see graphics/host-driver-deps.nix
 }:
 
+let
+  defaultPname = program:
+    if lib.isDerivation program then lib.getName program
+    else
+      let
+        base = baseNameOf (builtins.unsafeDiscardStringContext (toString program));
+      in
+      # without the hash if program is e.g. /nix/store/<hash>-script
+      if dirOf (toString program) == builtins.storeDir then lib.substring 33 (-1) base else base;
+in
+
 # actual arguments
 { program # absolute path of executable to start
 
   # output name
-, pname ? if lib.isDerivation program then lib.getName program else lib.last (builtins.split "/" (toString program))
+, pname ? defaultPname program
 , name ? "${pname}.AppImage"
 
   # graphics (OpenGL, EGL, Vulkan, GBM, VA-API, VDPAU) driver support
@@ -32,10 +43,22 @@
 }:
 
 assert lib.assertOneOf "graphics" graphics [ true false "auto" ];
+assert lib.assertMsg (lib.hasPrefix "${builtins.storeDir}/" "${program}") "mkAppImage: program '${toString program}' is not in the nix store";
 
 let
   # as a string, which copies it to the store if it's a path
   programPath = "${program}";
+
+  # the store path that contains program, e.g. /nix/store/<hash>-hello for
+  # /nix/store/<hash>-hello/bin/hello. Unlike paths inside store paths, it can't
+  # contain whitespace, which exportReferencesGraph doesn't support.
+  programStorePath =
+    let
+      rel = lib.removePrefix "${builtins.storeDir}/" (builtins.unsafeDiscardStringContext programPath);
+      name = builtins.head (builtins.split "/" rel);
+    in
+    # substring, unlike most string functions, keeps the string's context
+    builtins.substring 0 (lib.stringLength "${builtins.storeDir}/${name}") programPath;
 
   commonArgs = [
     "-offset $(stat -L -c%s ${lib.escapeShellArg mkappimage-runtime})" # squashfs comes after the runtime
@@ -50,7 +73,8 @@ let
   #
   # Due to a bug in Nix, writeClosure with a path *under* a nix store path (e.g.
   # /nix/store/...-hello/bin/hello) raises the error "path '$program' is not in
-  # the Nix store".
+  # the Nix store". (We now only use it with store paths, but writeClosure also
+  # isn't available in older nixpkgs.)
   #
   # See: https://github.com/ralismark/nix-appimage/issues/16
   # See: https://github.com/NixOS/nixpkgs/issues/316652
@@ -151,7 +175,7 @@ runCommand name
   ${./extra-files.sh} ${lib.escapeShellArg programPath}
 
   # the store paths to include
-  cat ${writeReferencesToFile programPath} > closure
+  cat ${writeReferencesToFile programStorePath} > closure
   # additional mksquashfs pseudo file definitions and actions
   touch pseudo actions
 
@@ -180,11 +204,16 @@ runCommand name
     "-no-strip" # don't strip leading dirs, to preserve the fact that everything's in the nix store
   ] ++ commonArgs)}
 
+  # (as an array, since the .desktop file's name could contain spaces)
+  shopt -s nullglob dotglob
+  extras=(extras/*) # including .DirIcon
+  shopt -u nullglob dotglob
+
   mksquashfs ${builtins.concatStringsSep " " ([
     # second run of mksquashfs adds the apprun
     # no -no-strip since we *do* want to strip leading dirs now
     "${mkappimage-apprun}/*"
-    "$(find extras -mindepth 1 -maxdepth 1)" # to include .DirIcon
+    ''"''${extras[@]}"''
     "$out"
     "-no-recovery" # i don't know what a recovery file is but it gives "No such file or directory"
   ] ++ commonArgs)}

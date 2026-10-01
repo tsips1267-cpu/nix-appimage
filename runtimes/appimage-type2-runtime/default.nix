@@ -51,7 +51,7 @@ stdenv.mkDerivation {
   ];
 
   patchPhase = ''
-    # fixes for the keepalive pipe, root's mounts and --appimage-extract-and-run
+    # fixes for the keepalive pipe, TMPDIR and --appimage-extract-and-run
     patch -p1 < ${./fixes.patch}
 
     sed -e '/sqfs_usage/s/);/, true\0/' -i src/runtime/runtime.c

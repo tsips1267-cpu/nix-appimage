@@ -854,6 +854,11 @@ void child_main(char** argv)
 	die_if(exe_size < 0, "cannot read link %s", entrypoint);
 	exe[exe_size] = 0;
 
+	// argv[0] is the AppImage (or, with --appimage-extract-and-run, this
+	// AppRun), but programs expect it to be themselves, e.g. multi-call
+	// binaries like coreutils use it to decide what to do. The runtime puts the
+	// AppImage's path in $APPIMAGE and its argv[0] in $ARGV0 instead.
+	argv[0] = exe;
 	execv(exe, argv);
 	die_if(true, "cannot exec %s", exe);
 }
