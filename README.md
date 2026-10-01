@@ -51,6 +51,8 @@ Some things to be aware of:
 - Drivers get loaded into the bundled program, so they should come from a nixpkgs that is no newer than the program's, otherwise they may need a newer glibc than the program has.
   When using `mkAppImage` directly, you can pass `graphicsDrivers = [ pkgs.mesa ]` with the same `pkgs` as the program to avoid this.
 - GPUs that are newer than the bundled Mesa may not be supported by it, in which case programs fall back to software rendering.
+- To add `/run/opengl-driver`, AppRun gives the program its own `/run` containing the host's `/run` entries as of startup.
+  Entries created directly in the host's `/run` after that (or sockets like `/run/docker.sock` that get recreated when their daemon restarts) aren't visible to the program until it's restarted.
 - Vulkan programs also see the host's Vulkan driver manifests (in `/usr/share/vulkan/icd.d`).
   Depending on the distro, this can make each GPU show up twice (both using the bundled driver), or make the Vulkan loader print errors about host drivers it can't load.
 
@@ -59,10 +61,7 @@ Some things to be aware of:
 We only make a best-effort attempt to copy in the relevant .desktop files and icons, so they may not be present.
 This doesn't affect the running of bundled apps, but might cause issues with showing up correctly in application launchers (e.g. rofi).
 
-The current implementation also has some limitations:
-
-- This requires Linux User Namespaces (i.e. `CAP_SYS_USER_NS`), which are available since Linux 3.8 (released in 2013), but may not be enabled for security reasons.
-- Plain files in the root directory aren't visible to the bundled app.
+The current implementation also requires unprivileged Linux User Namespaces, which are available since Linux 3.8 (released in 2013), but may not be enabled for security reasons.
 
 ## Under The Hood
 
@@ -91,5 +90,4 @@ AppRuns are included within the flake as `packages.<system>.appimage-appruns.<na
 Currently supported are:
 
 - `userns-chroot` (default).
-  This uses Linux User Namespaces and chroot to make /nix/store appear to have the bundled files, similar to [nix-user-chroot](https://github.com/nix-community/nix-user-chroot).
-  There is a known problem of plain files in the root folder not being visible to the bundled app when using this AppRun.
+  This uses Linux User Namespaces and pivot_root to make /nix/store appear to have the bundled files, similar to [nix-user-chroot](https://github.com/nix-community/nix-user-chroot).

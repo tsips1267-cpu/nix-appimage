@@ -10,23 +10,28 @@
 # package (e.g. libnvidia-egl-wayland needs libwayland-server).
 { lib
 , runCommand
-, xorg
 , libdrm
 , libgbm
 , libglvnd
 , wayland
 , stdenv
+
+  # newer nixpkgs deprecate the xorg set in favour of these top-level packages
+, xorg ? { }
+, libx11 ? xorg.libX11
+, libxext ? xorg.libXext
+, libxcb ? xorg.libxcb
 }:
 
 let
   libs = {
-    "libX11.so.6" = xorg.libX11;
-    "libX11-xcb.so.1" = xorg.libX11;
-    "libXext.so.6" = xorg.libXext;
-    "libxcb.so.1" = xorg.libxcb;
-    "libxcb-dri3.so.0" = xorg.libxcb;
-    "libxcb-glx.so.0" = xorg.libxcb;
-    "libxcb-present.so.0" = xorg.libxcb;
+    "libX11.so.6" = libx11;
+    "libX11-xcb.so.1" = libx11;
+    "libXext.so.6" = libxext;
+    "libxcb.so.1" = libxcb;
+    "libxcb-dri3.so.0" = libxcb;
+    "libxcb-glx.so.0" = libxcb;
+    "libxcb-present.so.0" = libxcb;
     "libdrm.so.2" = libdrm;
     "libgbm.so.1" = libgbm;
     "libwayland-client.so.0" = wayland;

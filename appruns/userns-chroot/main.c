@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -97,7 +98,7 @@ static void* xrealloc(void* ptr, size_t size)
 static int write_to(const char* path, const char* fmt, ...)
 {
 	int fd = open(path, O_WRONLY);
-	if (fd > 0) {
+	if (fd >= 0) {
 		va_list args;
 		va_start(args, fmt);
 		if (vdprintf(fd, fmt, args) < 0) {
@@ -195,7 +196,7 @@ static void bind_entries(const char* from_dir, const char* to_dir, const char* c
 		struct stat statbuf;
 		if (lstat(from, &statbuf) == 0 && S_ISLNK(statbuf.st_mode)) {
 			// imitate symlinks as symlinks, so they resolve the same way
-			// inside the chroot
+			// inside the new root
 			char* target = read_link(from);
 			if (!target || symlink(target, to) < 0) {
 				warn("symlink %s -> %s", to, target ? target : from);
@@ -271,7 +272,7 @@ static bool read_graphics_config(struct graphics_config* config)
 	const char* cache_targets = strprintf("%s/ld.so.cache-targets", dir);
 
 	// these are symlinks to /nix/store paths, which we can only resolve after
-	// we've chrooted
+	// we've changed root
 	config->drivers = read_link(drivers);
 	config->host_deps = read_link(host_deps);
 	config->cache_targets = read_file(cache_targets, NULL);
@@ -688,13 +689,11 @@ static void setup_nvidia(const struct graphics_config* config)
 
 #endif
 
-// Called after chroot, with /run being on our tmpfs
+// Called after changing root, with /run being our tmpfs
 static void setup_graphics(const struct graphics_config* config)
 {
-	// a separate tmpfs, since our mountroot is unbindable and so we can't
-	// bind-mount files in it elsewhere
-	if (mkdir(DRIVER_LINK, 0755) < 0 || mount("tmpfs", DRIVER_LINK, "tmpfs", 0, "mode=755") < 0) {
-		warn("cannot create " DRIVER_LINK);
+	if (mkdir(DRIVER_LINK, 0755) < 0) {
+		warn("mkdir " DRIVER_LINK);
 		return;
 	}
 
@@ -735,10 +734,19 @@ void child_main(char** argv)
 		// > be denied by writing "deny" to the /proc/[pid]/setgroups file (see
 		// > below) before writing to gid_map.
 		die_if(write_to("/proc/self/setgroups", "deny"), "cannot write setgroups");
-		die_if(write_to("/proc/self/gid_map", "%d %d 1\n", uid, gid), "cannot write gid_map");
+		die_if(write_to("/proc/self/gid_map", "%d %d 1\n", gid, gid), "cannot write gid_map");
 	}
 
 	// Mountpoint ----------------------------------------------------------------
+
+	// Stop our mounts from propagating back to the host's mount namespace, while
+	// still seeing the host's new mounts (e.g. a USB drive being plugged in).
+	// This already happens if we created a user namespace, but not as root.
+	// EINVAL means / isn't a mount point (e.g. we're in a chroot), which we can't
+	// do anything about.
+	if (mount("none", "/", 0, MS_REC | MS_SLAVE, 0) < 0 && errno != EINVAL) {
+		warn("cannot make mounts slaves");
+	}
 
 	// tmpfs so we don't need to cleanup
 	die_if(mount("tmpfs", mountroot, "tmpfs", 0, 0) < 0, "mount tmpfs -> %s", mountroot);
@@ -751,8 +759,11 @@ void child_main(char** argv)
 	bind_entries("/", mountroot, root_skip);
 
 	if (provide_graphics) {
+		// a tmpfs rather than a directory in mountroot, since things in an
+		// unbindable mount can't be bind-mounted elsewhere
 		const char* run_to = strprintf("%s/run", mountroot);
 		die_if(mkdir(run_to, 0755) < 0, "mkdir %s", run_to);
+		die_if(mount("tmpfs", run_to, "tmpfs", 0, "mode=755") < 0, "mount tmpfs -> %s", run_to);
 		bind_entries("/run", run_to, NULL);
 		free((void*) run_to);
 	}
@@ -767,14 +778,25 @@ void child_main(char** argv)
 	free((void*) nix_from);
 	free((void*) nix_to);
 
-	// Chroot --------------------------------------------------------------------
+	// Change root ---------------------------------------------------------------
 
 	// save where we were so we can cd into it
 	char cwd[PATH_MAX];
 	die_if(!getcwd(cwd, PATH_MAX), "cannot getcwd");
 
-	// chroot
-	die_if(chroot(mountroot) < 0, "cannot chroot %s", mountroot);
+	// Use pivot_root rather than chroot, since the kernel doesn't let chrooted
+	// processes create user namespaces, which e.g. bwrap and Chromium's sandbox
+	// need. Passing "." for both arguments puts the old root on top of the new
+	// one, which we then detach (see pivot_root(2)).
+	//
+	// pivot_root doesn't work in some situations (e.g. if the current root is
+	// the initramfs), so fall back to chroot.
+	die_if(chdir(mountroot) < 0, "cannot chdir %s", mountroot);
+	if (syscall(SYS_pivot_root, ".", ".") == 0) {
+		die_if(umount2(".", MNT_DETACH) < 0, "cannot detach old root");
+	} else {
+		die_if(chroot(mountroot) < 0, "cannot chroot %s", mountroot);
+	}
 
 	// cd back again
 	die_if(chdir(cwd) < 0, "cannot chdir %s", cwd);
@@ -804,8 +826,8 @@ int main(int argc, char** argv)
 
 	// get location of exe
 	char appdir_buf[PATH_MAX];
-	appdir = dirname(realpath("/proc/self/exe", appdir_buf));
-	die_if(!appdir, "cannot access /proc/self/exe");
+	die_if(!realpath("/proc/self/exe", appdir_buf), "cannot access /proc/self/exe");
+	appdir = dirname(appdir_buf);
 
 	// use <appdir>/mountpoint as alternate root. Since this already exists
 	// inside the squashfs, we don't need to remove this dir later (which we

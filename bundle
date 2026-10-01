@@ -14,7 +14,7 @@ a relative path (relative to the /bin subdirectory).
 Example usage:
 
 	$ ./bundle dnsutils /bin/dig # or ./bundle dnsutils dig
-	$ ./dig-x86_64.AppImage -v
+	$ ./dig.AppImage -v
 	DiG 9.18.14
 EOF
 	exit 1

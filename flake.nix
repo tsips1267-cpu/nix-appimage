@@ -73,6 +73,18 @@
                 vulkaninfo --summary | grep "driverName *= llvmpipe"
               '');
             };
+
+            # checks that the bundled program keeps our uid/gid, and can create
+            # user namespaces (e.g. for sandboxing)
+            namespaces-appimage = lib.mkAppImage {
+              pname = "namespaces-test";
+              program = toString (pkgs.writeShellScript "namespaces-test" ''
+                set -eux
+                export PATH=${pkgs.lib.makeBinPath [ pkgs.coreutils pkgs.util-linux ]}
+                [ "$(id -u):$(id -g)" = "$1" ]
+                unshare --user --map-root-user true
+              '');
+            };
           in
           {
             hello-is-static = pkgs.runCommand "check-hello-is-static"
@@ -97,10 +109,15 @@
               touch $out
             '';
 
+            namespaces-work = pkgs.runCommand "check-namespaces-work" { } ''
+              HOME=$TMPDIR ${namespaces-appimage} --appimage-extract-and-run "$(id -u):$(id -g)"
+              touch $out
+            '';
+
             graphics-works = pkgs.runCommand "check-graphics-works"
               {
                 # not xvfb-run, since its Xvfb doesn't support GLX
-                nativeBuildInputs = [ pkgs.xorg.xorgserver ];
+                nativeBuildInputs = [ (pkgs.xorg-server or pkgs.xorg.xorgserver) ];
               } ''
               # Xvfb needs a driver for GLX, which it also looks for in
               # /run/opengl-driver, so point it at one. We only do this for Xvfb
