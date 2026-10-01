@@ -30,13 +30,33 @@ DiG 9.18.14
 You can also use nix-appimage as a nix library -- the flake provides `lib.<system>.mkAppImage` which supports more options.
 See mkAppImage.nix for details.
 
+## Graphics (OpenGL, EGL, Vulkan)
+
+Programs that use the GPU work out of the box on other distros, without needing something like [nixGL](https://github.com/guibou/nixGL).
+
+Normally this is a [known problem](https://github.com/NixOS/nixpkgs/issues/9415): nix-built programs look for GPU drivers in `/run/opengl-driver`, which only exists on NixOS.
+To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering), and AppRun provides it at `/run/opengl-driver` when the host doesn't have one.
+NVIDIA's proprietary driver can't be bundled, since it has to match the host's kernel module, so if the host has it installed, AppRun makes the host's NVIDIA libraries available to the bundled program as well.
+If the host already has `/run/opengl-driver` (e.g. it's NixOS), that's used as-is.
+
+By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan or GBM (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, etc), since they add roughly 100-150MB to the AppImage.
+Note that determining this still requires downloading the drivers when building.
+`mkAppImage` has options to control this:
+
+- `graphics`: `"auto"` (the default) to detect whether the program needs drivers, or `true`/`false` to always/never bundle them.
+- `graphicsDrivers`: the packages that make up `/run/opengl-driver`, like `hardware.graphics.package` and `hardware.graphics.extraPackages` on NixOS. Defaults to `[ mesa ]` from nix-appimage's nixpkgs.
+
+Some things to be aware of:
+
+- Drivers get loaded into the bundled program, so they should come from a nixpkgs that is no newer than the program's, otherwise they may need a newer glibc than the program has.
+  When using `mkAppImage` directly, you can pass `graphicsDrivers = [ pkgs.mesa ]` with the same `pkgs` as the program to avoid this.
+- GPUs that are newer than the bundled Mesa may not be supported by it, in which case programs fall back to software rendering.
+- Vulkan programs also see the host's Vulkan driver manifests (in `/usr/share/vulkan/icd.d`).
+  Depending on the distro, this can make each GPU show up twice (both using the bundled driver), or make the Vulkan loader print errors about host drivers it can't load.
+
 ## Caveats
 
-OpenGL apps not being able to run on non-NixOS systems is a **known problem**, see https://github.com/NixOS/nixpkgs/issues/9415 and https://github.com/ralismark/nix-appimage/issues/5.
-You'll need to use something like [nixGL](https://github.com/guibou/nixGL).
-Addressing this problem outright is _out of scope_ for this project, however PRs to integrate solutions (e.g. nixGL) are welcome.
-
-Additionally, we only make a best-effort attempt to copy in the relevant .desktop files and icons, so they may not be present.
+We only make a best-effort attempt to copy in the relevant .desktop files and icons, so they may not be present.
 This doesn't affect the running of bundled apps, but might cause issues with showing up correctly in application launchers (e.g. rofi).
 
 The current implementation also has some limitations:
@@ -54,6 +74,10 @@ The squashfs contains all the files needed to run the program:
 - `entrypoint`, a symlink to the actual executable, e.g. `/nix/store/q9cqc10sw293xpx3hca4qpsmbg7hsgzy-hello-2.12.1/bin/hello`
 - `AppRun`, which gets started after the squashfs is mounted.
   This isn't the actual bundled executable, but a wrapper that makes the bundled nix/store file visible under /nix/store before executing `entrypoint`.
+- `graphics/`, if graphics drivers are bundled.
+  This contains `drivers`, a symlink to the drivers that AppRun puts at `/run/opengl-driver`, and the information AppRun needs to make the host's NVIDIA driver available.
+  For the latter, AppRun finds the host's NVIDIA libraries using the host's ld.so cache, and adds them to the ld.so cache of the bundled glibc (which nixpkgs' glibc reads from `<glibc>/etc/ld.so.cache` rather than `/etc/ld.so.cache`).
+  Unlike `LD_LIBRARY_PATH`, this only affects nix-built programs, and doesn't take priority over libraries found through RUNPATH.
 
 Runtimes are included within the flake as `packages.<system>.appimage-runtimes.<name>`.
 Currently supported are:

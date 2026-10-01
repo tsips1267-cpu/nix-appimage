@@ -1,4 +1,5 @@
 { lib
+, buildEnv
 , runCommand
 , squashfsTools
 , writeTextFile
@@ -6,6 +7,8 @@
   # mkappimage-specific, passed from flake.nix
 , mkappimage-runtime # runtimes are an executable that mount the squashfs part of the appimage and start AppRun
 , mkappimage-apprun # appruns contain an AppRun executable that does setup and launches entrypoint
+, mkappimage-graphics-drivers # default graphics drivers to bundle (mesa)
+, mkappimage-host-driver-deps # libraries that the host's NVIDIA driver needs, see graphics/host-driver-deps.nix
 }:
 
 # actual arguments
@@ -15,9 +18,20 @@
 , pname ? (lib.last (builtins.split "/" program))
 , name ? "${pname}.AppImage"
 
+  # graphics (OpenGL, EGL, Vulkan, GBM, VA-API, VDPAU) driver support
+  #
+  # nix-built programs look for GPU drivers in /run/opengl-driver, which only
+  # exists on NixOS. To make these programs work on other distros, we can bundle
+  # drivers (and use the host's NVIDIA driver if it has one), which AppRun then
+  # makes available at /run/opengl-driver if the host doesn't have it.
+, graphics ? "auto" # whether to bundle drivers: true, false, or "auto" to only do so if program uses OpenGL/EGL/Vulkan/GBM
+, graphicsDrivers ? mkappimage-graphics-drivers # packages that make up /run/opengl-driver, like hardware.graphics.{package,extraPackages} on NixOS
+
   # advanced appimage configuration
 , squashfsArgs ? [ ] # additional arguments to pass to mksquashfs
 }:
+
+assert lib.assertOneOf "graphics" graphics [ true false "auto" ];
 
 let
   commonArgs = [
@@ -52,6 +66,64 @@ let
         for ((i = 0; i < nrRefs; i++)); do read ref; done
       done < graph
     '';
+
+  graphicsDriversEnv = buildEnv {
+    name = "nix-appimage-graphics-drivers";
+    paths = graphicsDrivers;
+  };
+
+  # Adds the graphics drivers to the image. AppRun reads graphics/ in the image
+  # (staged in extras/graphics) to find out what we've bundled.
+  bundleGraphics = ''
+    echo "bundling graphics drivers"
+
+    sort -u closure > closure-program
+    cat ${writeReferencesToFile graphicsDriversEnv} ${writeReferencesToFile mkappimage-host-driver-deps} | sort -u > closure-graphics
+    cat closure-graphics >> closure
+
+    # static libraries aren't used at runtime, and llvm's (which mesa depends
+    # on) are a few hundred MB. Only exclude them from paths that are just
+    # there for the drivers, to not change what the program itself sees.
+    comm -13 closure-program closure-graphics | while read -r path; do
+      find "$path" -type f -name '*.a'
+    done >> excludes
+
+    mkdir extras/graphics
+    ln -s ${graphicsDriversEnv} extras/graphics/drivers
+    ln -s ${mkappimage-host-driver-deps} extras/graphics/host-driver-deps
+
+    # nixpkgs' glibc reads its ld.so cache from <glibc>/etc/ld.so.cache instead
+    # of /etc/ld.so.cache. Add empty ones for AppRun to mount over.
+    touch extras/graphics/ld.so.cache-targets
+    sort -u closure | while read -r path; do
+      for ldso in "$path"/lib/ld-linux*.so.*; do
+        if [ -e "$ldso" ] && [ ! -e "$path/etc/ld.so.cache" ] && grep -qF "$path/etc/ld.so.cache" "$ldso"; then
+          echo "$path/etc/ld.so.cache" >> extras/graphics/ld.so.cache-targets
+          if [ ! -e "$path/etc" ]; then
+            echo "''${path#/}/etc d 555 0 0" >> pseudo
+          fi
+          echo "''${path#/}/etc/ld.so.cache f 444 0 0 true" >> pseudo
+          break
+        fi
+      done
+    done
+  '';
+
+  # Whether the program uses graphics drivers, by checking for the libraries
+  # that load them: libglvnd's libGL/libEGL/etc, vulkan-loader's libvulkan, and
+  # libgbm.
+  detectGraphics = ''
+    usesGraphics=
+    while read -r path; do
+      for lib in libGL.so.1 libGLX.so.0 libEGL.so.1 libOpenGL.so.0 libGLESv2.so.2 libvulkan.so.1 libgbm.so.1; do
+        if [ -e "$path/lib/$lib" ]; then
+          echo "program uses $path/lib/$lib"
+          usesGraphics=1
+          break 2
+        fi
+      done
+    done < closure
+  '';
 in
 runCommand name
 {
@@ -66,9 +138,23 @@ runCommand name
 
   ${./extra-files.sh} ${program}
 
+  # the store paths to include
+  cat ${writeReferencesToFile program} > closure
+  # additional mksquashfs pseudo file definitions and excluded files
+  touch pseudo excludes
+
+  ${if graphics == "auto" then ''
+    ${detectGraphics}
+    if [ -n "$usesGraphics" ]; then
+      ${bundleGraphics}
+    else
+      echo "program doesn't seem to use graphics drivers, not bundling them"
+    fi
+  '' else lib.optionalString graphics bundleGraphics}
+
   mksquashfs ${builtins.concatStringsSep " " ([
     # first run of mksquashfs copies the nix/store closure and additional files
-    "$(cat ${writeReferencesToFile program})"
+    "$(sort -u closure)"
     "$out"
 
     # additional files
@@ -76,6 +162,8 @@ runCommand name
       # symlink entrypoint to the executable to run
       "entrypoint s 555 0 0 ${program}"
     ])
+    "-pf pseudo"
+    "-ef excludes"
 
     "-no-strip" # don't strip leading dirs, to preserve the fact that everything's in the nix store
   ] ++ commonArgs)}
