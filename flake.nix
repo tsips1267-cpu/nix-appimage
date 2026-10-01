@@ -12,7 +12,8 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+    # AppImages (and the namespaces AppRun uses) are Linux-only
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
       let
         # regular (non-static) nixpkgs, for things that get loaded into the
         # bundled program (e.g. graphics drivers)
