@@ -721,7 +721,7 @@ void child_main(char** argv)
 	}
 
 	if (userns) {
-		die_if(unshare(CLONE_NEWNS | CLONE_NEWUSER) < 0, "cannot unshare");
+		die_if(unshare(CLONE_NEWNS | CLONE_NEWUSER) < 0, "cannot unshare (are unprivileged user namespaces disabled?)");
 
 		// UID/GID Mapping -----------------------------------------------------------
 
@@ -758,7 +758,12 @@ void child_main(char** argv)
 	}
 
 	// tmpfs so we don't need to cleanup
-	die_if(mount("tmpfs", mountroot, "tmpfs", 0, "mode=755") < 0, "mount tmpfs -> %s", mountroot);
+	if (mount("tmpfs", mountroot, "tmpfs", 0, "mode=755") < 0) {
+		// this is the first thing that needs the user namespace's capabilities,
+		// which some systems deny, e.g. Ubuntu since 23.10 through AppArmor
+		die_if(userns && errno == EPERM, "mount tmpfs -> %s (is what unprivileged user namespaces can do restricted, e.g. by kernel.apparmor_restrict_unprivileged_userns?)", mountroot);
+		die_if(true, "mount tmpfs -> %s", mountroot);
+	}
 	// make unbindable to both prevent event propagation as well as mount explosion
 	die_if(mount(mountroot, mountroot, "none", MS_UNBINDABLE, 0) < 0, "mount tmpfs bind -> %s", mountroot);
 

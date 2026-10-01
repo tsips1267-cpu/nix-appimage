@@ -67,6 +67,7 @@ This doesn't affect the running of bundled apps, but might cause issues with sho
 Since the bundled app sees the AppImage's `/nix/store` instead of the host's, running an AppImage that is itself in the host's `/nix/store` (e.g. `./result`) means `$APPIMAGE` points to a file the app can't see, which matters for apps that relaunch themselves through it.
 
 The current implementation also requires unprivileged Linux User Namespaces, which are available since Linux 3.8 (released in 2013), but may not be enabled for security reasons.
+In particular, Ubuntu 23.10 and later restrict what they can do using AppArmor (`kernel.apparmor_restrict_unprivileged_userns`), so AppImages made by nix-appimage only work for normal users there if that's turned off, or allowed for the AppImage by an AppArmor profile.
 Running the bundled app this way (see AppRun below) has some side effects:
 
 - Each top-level directory (e.g. `/home` and `/tmp`) is a separate mount for the app, so renaming or hard-linking files between them fails with "Invalid cross-device link" (`EXDEV`), even if they're on the same filesystem.
