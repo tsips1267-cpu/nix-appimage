@@ -832,6 +832,12 @@ void child_main(char** argv)
 
 	if (provide_graphics) {
 		setup_graphics(&graphics);
+
+		// like for the root, writes directly to /run would otherwise silently go
+		// to our tmpfs. This doesn't affect the mounts within it.
+		if (mount("/run", "/run", "none", MS_REMOUNT | MS_BIND | MS_RDONLY, 0) < 0) {
+			warn("cannot make /run read-only");
+		}
 	}
 
 	// Exec ----------------------------------------------------------------------

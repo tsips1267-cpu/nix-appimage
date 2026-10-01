@@ -1,0 +1,60 @@
+--- a/src/runtime/runtime.c	2026-10-01 23:04:54.066317728 +0000
++++ b/src/runtime/runtime.c	2026-10-01 23:04:54.081731678 +0000
+@@ -1480,8 +1480,13 @@
+             exit(EXIT_EXECERROR);
+         }
+ 
+-        int pid;
+-        if ((pid = fork()) == -1) {
++        // nix-appimage: run AppRun in this process rather than a child, so that
++        // it gets our signals and its exit status (including dying from a
++        // signal) is ours. We'd only wait for it in order to clean up, which
++        // does nothing anyway: musl's nftw() does nothing when fd_limit is 0,
++        // and later runs reuse the extracted files.
++        int pid = 0;
++        if (pid == -1) {
+             int error = errno;
+             fprintf(stderr, "fork() failed: %s\n", strerror(error));
+             exit(EXIT_EXECERROR);
+@@ -1586,6 +1591,16 @@
+         exit(EXIT_EXECERROR);
+     }
+ 
++    // nix-appimage: make sure stdin/stdout/stderr are open, so the keepalive
++    // pipe doesn't end up as one of them: the app would read from it, and
++    // fuse_daemonize() replaces them with /dev/null in the FUSE process, which
++    // would then never notice the app exiting.
++    for (int fd = 0; fd < 3; fd++) {
++        if (fcntl(fd, F_GETFD) == -1) {
++            open("/dev/null", O_RDWR);
++        }
++    }
++
+     if (pipe(keepalive_pipe) == -1) {
+         perror("pipe error");
+         exit(EXIT_EXECERROR);
+@@ -1608,7 +1623,9 @@
+         char* dir = realpath(appimage_path, NULL);
+ 
+         char options[100];
+-        sprintf(options, "ro,offset=%zu", fs_offset);
++        // nix-appimage: when root, let the app drop privileges and still access
++        // the mount (the mount point is only accessible to root anyway)
++        sprintf(options, "ro,offset=%zu%s", fs_offset, getuid() == 0 ? ",allow_other" : "");
+ 
+         child_argv[0] = dir;
+         child_argv[1] = "-o";
+@@ -1637,6 +1654,13 @@
+         /* Pause until mounted */
+         read(keepalive_pipe[0], &c, 1);
+ 
++        // nix-appimage: move the keepalive pipe out of the way, since the AppImage
++        // gets unmounted when it's closed, which the app could otherwise do by
++        // accident (e.g. a shell script doing `exec 3>file`)
++        if (dup2(keepalive_pipe[0], 1022) != -1) {
++            close(keepalive_pipe[0]);
++        }
++
+         /* Fuse process has now daemonized, reap our child */
+         waitpid(pid, NULL, 0);
+ 

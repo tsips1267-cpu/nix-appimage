@@ -35,9 +35,10 @@ See mkAppImage.nix for details.
 Programs that use the GPU work out of the box on other distros, without needing something like [nixGL](https://github.com/guibou/nixGL).
 
 Normally this is a [known problem](https://github.com/NixOS/nixpkgs/issues/9415): nix-built programs look for GPU drivers in `/run/opengl-driver`, which only exists on NixOS.
-To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering), and AppRun provides it at `/run/opengl-driver` when the host doesn't have one.
+To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering), and AppRun provides it to the bundled program at `/run/opengl-driver`.
 NVIDIA's proprietary driver can't be bundled, since it has to match the host's kernel module, so if the host has it installed, AppRun makes the host's NVIDIA libraries available to the bundled program as well.
-This is also done on NixOS, since the host's `/run/opengl-driver` points into its `/nix/store`, which the AppImage replaces with its own (so on NixOS, the host's NVIDIA driver can't be used).
+The bundled drivers are used even if the host has its own `/run/opengl-driver` (i.e. on NixOS), since that points into the host's `/nix/store`, which the AppImage replaces with its own.
+This also means that on NixOS, the host's NVIDIA driver can't be used.
 
 By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan, GBM, VA-API or VDPAU (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, libva, etc), since they add roughly 100-150MB to the AppImage.
 Note that determining this still requires downloading the drivers when building.
@@ -53,8 +54,8 @@ Some things to be aware of:
   On hosts with NVIDIA's driver, a few libraries from nix-appimage's nixpkgs also get loaded (see graphics/host-driver-deps.nix), which `mkAppImage.override { mkappimage-host-driver-deps = ...; }` can replace.
 - Programs that only use CUDA (rather than e.g. OpenGL) aren't detected, so need `graphics = true` to get access to the host's NVIDIA driver.
 - GPUs that are newer than the bundled Mesa may not be supported by it, in which case programs fall back to software rendering.
-- To add `/run/opengl-driver`, AppRun gives the program its own `/run` containing the host's `/run` entries as of startup.
-  Entries created directly in the host's `/run` after that (or sockets like `/run/docker.sock` that get recreated when their daemon restarts) aren't visible to the program until it's restarted.
+- To add `/run/opengl-driver`, AppRun gives the program its own read-only `/run` containing the host's `/run` entries as of startup (the directories in it are still writable as usual).
+  Entries created directly in the host's `/run` after that (or sockets like `/run/docker.sock` that get recreated when their daemon restarts) aren't visible to the program until it's restarted, and the program can't create entries directly in `/run`.
 - Vulkan programs also see the host's Vulkan driver manifests (in `/usr/share/vulkan/icd.d`).
   Depending on the distro, this can make each GPU show up twice (both using the bundled driver), or make the Vulkan loader print errors about host drivers it can't load.
 
@@ -66,6 +67,13 @@ This doesn't affect the running of bundled apps, but might cause issues with sho
 Since the bundled app sees the AppImage's `/nix/store` instead of the host's, running an AppImage that is itself in the host's `/nix/store` (e.g. `./result`) means `$APPIMAGE` points to a file the app can't see, which matters for apps that relaunch themselves through it.
 
 The current implementation also requires unprivileged Linux User Namespaces, which are available since Linux 3.8 (released in 2013), but may not be enabled for security reasons.
+Running the bundled app this way (see AppRun below) has some side effects:
+
+- Each top-level directory (e.g. `/home` and `/tmp`) is a separate mount for the app, so renaming or hard-linking files between them fails with "Invalid cross-device link" (`EXDEV`), even if they're on the same filesystem.
+  Many programs fall back to copying when this happens, but not all do.
+- When run by a normal user, only that user's uid and gid are mapped into the user namespace.
+  So files owned by other users (including root) appear to be owned by `nobody`, supplementary groups appear as `nogroup`, and setuid programs such as `sudo` don't work.
+- Mounts made by the app aren't visible outside it, and `/` itself is read-only.
 
 ## Under The Hood
 
@@ -82,7 +90,7 @@ The squashfs contains all the files needed to run the program:
   For the latter, AppRun finds the host's NVIDIA libraries using the host's ld.so cache, and adds them to the ld.so cache of the bundled glibc (which nixpkgs' glibc reads from `<glibc>/etc/ld.so.cache` rather than `/etc/ld.so.cache`).
   Unlike `LD_LIBRARY_PATH`, this only affects nix-built programs, and doesn't take priority over libraries found through RUNPATH.
 
-Runtimes are included within the flake as `packages.<system>.appimage-runtimes.<name>`.
+Runtimes are included within the flake as `legacyPackages.<system>.appimage-runtimes.<name>`.
 Currently supported are:
 
 - `appimage-type2-runtime` (default)
@@ -90,7 +98,7 @@ Currently supported are:
 - `appimagecrafters`.
   This is [AppImageCrafers/appimage-runtime](https://github.com/AppImageCrafters/appimage-runtime), a similar static runtime that was the old default for nix-appimage.
 
-AppRuns are included within the flake as `packages.<system>.appimage-appruns.<name>`.
+AppRuns are included within the flake as `legacyPackages.<system>.appimage-appruns.<name>`.
 Currently supported are:
 
 - `userns-chroot` (default).

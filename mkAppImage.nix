@@ -15,7 +15,7 @@
 { program # absolute path of executable to start
 
   # output name
-, pname ? (lib.last (builtins.split "/" (toString program)))
+, pname ? if lib.isDerivation program then lib.getName program else lib.last (builtins.split "/" (toString program))
 , name ? "${pname}.AppImage"
 
   # graphics (OpenGL, EGL, Vulkan, GBM, VA-API, VDPAU) driver support
@@ -23,7 +23,7 @@
   # nix-built programs look for GPU drivers in /run/opengl-driver, which only
   # exists on NixOS. To make these programs work on other distros, we can bundle
   # drivers (and use the host's NVIDIA driver if it has one), which AppRun then
-  # makes available at /run/opengl-driver if the host doesn't have it.
+  # makes available at /run/opengl-driver.
 , graphics ? "auto" # whether to bundle drivers: true, false, or "auto" to only do so if program uses OpenGL/EGL/Vulkan/GBM
 , graphicsDrivers ? mkappimage-graphics-drivers # packages that make up /run/opengl-driver, like hardware.graphics.{package,extraPackages} on NixOS
 
@@ -34,6 +34,9 @@
 assert lib.assertOneOf "graphics" graphics [ true false "auto" ];
 
 let
+  # as a string, which copies it to the store if it's a path
+  programPath = "${program}";
+
   commonArgs = [
     "-offset $(stat -L -c%s ${lib.escapeShellArg mkappimage-runtime})" # squashfs comes after the runtime
     "-all-root" # chown to root
@@ -140,15 +143,15 @@ runCommand name
     squashfsTools
   ];
 } ''
-  if ! test -f ${lib.escapeShellArg program} -a -x ${lib.escapeShellArg program}; then
-    echo "entrypoint '${program}' is not an executable file"
+  if ! test -f ${lib.escapeShellArg programPath} -a -x ${lib.escapeShellArg programPath}; then
+    echo "entrypoint '${programPath}' is not an executable file"
     exit 1
   fi
 
-  ${./extra-files.sh} ${lib.escapeShellArg program}
+  ${./extra-files.sh} ${lib.escapeShellArg programPath}
 
   # the store paths to include
-  cat ${writeReferencesToFile program} > closure
+  cat ${writeReferencesToFile programPath} > closure
   # additional mksquashfs pseudo file definitions and actions
   touch pseudo actions
 
@@ -169,7 +172,7 @@ runCommand name
     # additional files
     (lib.concatMapStrings (x: " -p ${lib.escapeShellArg x}") [
       # symlink entrypoint to the executable to run
-      "entrypoint s 555 0 0 ${program}"
+      "entrypoint s 555 0 0 ${programPath}"
     ])
     "-pf pseudo"
     "-action-file actions"
