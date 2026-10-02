@@ -24,7 +24,6 @@
         # runtimes are an executable that mount the squashfs part of the appimage and start AppRun
         # (these are sets of packages, so go in legacyPackages rather than packages)
         legacyPackages.appimage-runtimes = {
-          appimagecrafters = pkgs.callPackage ./runtimes/appimagecrafters { };
           appimage-type2-runtime = pkgs.callPackage ./runtimes/appimage-type2-runtime { };
         };
 

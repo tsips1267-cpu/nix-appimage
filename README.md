@@ -104,12 +104,12 @@ The squashfs contains all the files needed to run the program:
   Unlike `LD_LIBRARY_PATH`, this only affects nix-built programs, and doesn't take priority over libraries found through RUNPATH.
 
 Runtimes are included within the flake as `legacyPackages.<system>.appimage-runtimes.<name>`.
-Currently supported are:
+Currently there's one:
 
 - `appimage-type2-runtime` (default)
-  This is [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime), a static runtime maintained by the official AppImage team.
-- `appimagecrafters`.
-  This is [AppImageCrafers/appimage-runtime](https://github.com/AppImageCrafters/appimage-runtime), a similar static runtime that was the old default for nix-appimage.
+  This is [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime), a static runtime maintained by the official AppImage team, with some fixes (see runtimes/appimage-type2-runtime/fixes.patch).
+
+`appimagecrafters` ([AppImageCrafters/appimage-runtime](https://github.com/AppImageCrafters/appimage-runtime), the old default) was removed, since it's no longer maintained.
 
 AppRuns are included within the flake as `legacyPackages.<system>.appimage-appruns.<name>`.
 Currently supported are:
