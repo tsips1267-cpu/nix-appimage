@@ -24,7 +24,6 @@
         # runtimes are an executable that mount the squashfs part of the appimage and start AppRun
         # (these are sets of packages, so go in legacyPackages rather than packages)
         legacyPackages.appimage-runtimes = {
-          appimagecrafters = pkgs.callPackage ./runtimes/appimagecrafters { };
           appimage-type2-runtime = pkgs.callPackage ./runtimes/appimage-type2-runtime { };
         };
 
@@ -40,7 +39,14 @@
         lib.mkAppImage = pkgs.callPackage ./mkAppImage.nix {
           mkappimage-runtime = legacyPackages.appimage-runtimes.appimage-type2-runtime;
           mkappimage-apprun = legacyPackages.appimage-appruns.userns-chroot;
-          mkappimage-graphics-drivers = [ pkgsDynamic.mesa ];
+          # Mesa's VA-API (video decoding) drivers only cover AMD and Nouveau,
+          # so add Intel's, otherwise libva falls back to the host's, which
+          # can't find their dependencies
+          mkappimage-graphics-drivers = [ pkgsDynamic.mesa ]
+            ++ pkgsDynamic.lib.optionals pkgsDynamic.stdenv.hostPlatform.isx86 [
+            pkgsDynamic.intel-media-driver # iHD, for Broadwell and newer
+            pkgsDynamic.intel-vaapi-driver # i965, for older GPUs
+          ];
           mkappimage-host-driver-deps = packages.appimage-host-driver-deps;
         };
 
@@ -69,10 +75,18 @@
               pname = "graphics-test";
               program = toString (pkgs.writeShellScript "graphics-test" ''
                 set -eux
-                export PATH=${pkgs.lib.makeBinPath [ pkgs.mesa-demos pkgs.vulkan-tools pkgs.gnugrep ]}
+                export PATH=${pkgs.lib.makeBinPath [ pkgs.mesa-demos pkgs.vulkan-tools pkgs.gnugrep (pkgs.lib.getBin pkgs.stdenv.cc.libc) ]}
                 glxinfo -B | grep "OpenGL renderer string: llvmpipe"
                 eglinfo -B | grep "OpenGL core profile renderer: llvmpipe"
                 vulkaninfo --summary | grep "driverName *= llvmpipe"
+                # VA-API drivers (which need a GPU to actually use) can be loaded
+                for driver in /run/opengl-driver/lib/dri/*_drv_video.so; do
+                  if ldd "$driver" | grep "not found"; then exit 1; fi
+                done
+                ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isx86 ''
+                  [ -e /run/opengl-driver/lib/dri/iHD_drv_video.so ]
+                  [ -e /run/opengl-driver/lib/dri/i965_drv_video.so ]
+                ''}
               '');
             };
 
@@ -86,6 +100,25 @@
                 [ "$(id -u):$(id -g)" = "$1" ]
                 unshare --user --map-root-user true
               '');
+            };
+
+            # checks extracting files from the nix store (which are read-only),
+            # with names as long as they can be
+            extract-appimage = lib.mkAppImage {
+              pname = "extract-test";
+              program = "${pkgs.runCommand "extract-test" { } ''
+                mkdir -p $out/bin
+                touch $out/${pkgs.lib.strings.replicate 255 "x"}
+                cat > $out/bin/extract-test <<EOF
+                #!${pkgs.runtimeShell}
+                if [ "\$1" = --stdin ]; then
+                  ${pkgs.coreutils}/bin/readlink /proc/self/fd/0 2>/dev/null || echo closed
+                else
+                  printf '<%s>' "\$@"
+                fi
+                EOF
+                chmod +x $out/bin/extract-test
+              ''}/bin/extract-test";
             };
           in
           {
@@ -113,6 +146,26 @@
 
             namespaces-work = pkgs.runCommand "check-namespaces-work" { } ''
               HOME=$TMPDIR ${namespaces-appimage} --appimage-extract-and-run "$(id -u):$(id -g)"
+              touch $out
+            '';
+
+            extraction-works = pkgs.runCommand "check-extraction-works" { } ''
+              export HOME=$TMPDIR
+              # extracted directories can be accessed by other users (e.g. if
+              # the app switches to one), whatever our umask is
+              (umask 077 && ${extract-appimage} --appimage-extract-and-run > /dev/null)
+              [ "$(stat -c %a $TMPDIR/appimage_extracted_*/nix/store)" = 755 ]
+              # the AppImage isn't left open, which would be the app's stdin
+              # if that was closed
+              [ "$(${extract-appimage} --appimage-extract-and-run --stdin <&-)" = closed ]
+              # extract-and-run passes on the other arguments, whether it's
+              # asked for with the option or APPIMAGE_EXTRACT_AND_RUN=1
+              [ "$(${extract-appimage} --appimage-extract-and-run a "b c")" = "<a><b c>" ]
+              [ "$(APPIMAGE_EXTRACT_AND_RUN=1 ${extract-appimage} a "b c")" = "<a><b c>" ]
+              # extracting again replaces the existing files
+              ${extract-appimage} --appimage-extract > /dev/null
+              ${extract-appimage} --appimage-extract > /dev/null
+              [ "$(squashfs-root/AppRun a)" = "<a>" ]
               touch $out
             '';
 

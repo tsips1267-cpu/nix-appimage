@@ -797,6 +797,14 @@ void child_main(char** argv)
 	// affect the mounts within it.
 	die_if(mount(mountroot, mountroot, "none", MS_REMOUNT | MS_BIND | MS_RDONLY, 0) < 0, "cannot make %s read-only", mountroot);
 
+	// Now that nothing else gets bound into it, it doesn't need to be unbindable
+	// anymore, which would stop the app from binding / (e.g. `bwrap --ro-bind / /`,
+	// which also fails in its own mount namespace before Linux 6.17). Private
+	// still stops events propagating.
+	if (mount(NULL, mountroot, NULL, MS_PRIVATE, NULL) < 0) {
+		warn("cannot make %s private", mountroot);
+	}
+
 	// Change root ---------------------------------------------------------------
 
 	// save where we were so we can cd into it

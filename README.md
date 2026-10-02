@@ -37,17 +37,17 @@ See mkAppImage.nix for details.
 Programs that use the GPU work out of the box on other distros, without needing something like [nixGL](https://github.com/guibou/nixGL).
 
 Normally this is a [known problem](https://github.com/NixOS/nixpkgs/issues/9415): nix-built programs look for GPU drivers in `/run/opengl-driver`, which only exists on NixOS.
-To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering), and AppRun provides it to the bundled program at `/run/opengl-driver`.
+To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering) and, on x86_64, Intel's VA-API video decoding drivers (Mesa's only cover AMD and Nouveau), and AppRun provides them to the bundled program at `/run/opengl-driver`.
 NVIDIA's proprietary driver can't be bundled, since it has to match the host's kernel module, so if the host has it installed, AppRun makes the host's NVIDIA libraries available to the bundled program as well.
 The bundled drivers are used even if the host has its own `/run/opengl-driver` (i.e. on NixOS), since that points into the host's `/nix/store`, which the AppImage replaces with its own.
 This also means that on NixOS, the host's NVIDIA driver can't be used.
 
-By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan, GBM, VA-API or VDPAU (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, libva, etc), since they add roughly 100-150MB to the AppImage.
+By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan, GBM, VA-API or VDPAU (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, libva, etc), since they add roughly 150-180MB to the AppImage.
 Note that determining this still requires downloading the drivers when building.
 `mkAppImage` has options to control this:
 
 - `graphics`: `"auto"` (the default) to detect whether the program needs drivers, or `true`/`false` to always/never bundle them.
-- `graphicsDrivers`: the packages that make up `/run/opengl-driver`, like `hardware.graphics.package` and `hardware.graphics.extraPackages` on NixOS. Defaults to `[ mesa ]` from nix-appimage's nixpkgs.
+- `graphicsDrivers`: the packages that make up `/run/opengl-driver`, like `hardware.graphics.package` and `hardware.graphics.extraPackages` on NixOS. Defaults to `[ mesa ]` from nix-appimage's nixpkgs, plus `intel-media-driver` and `intel-vaapi-driver` on x86_64.
 
 Some things to be aware of:
 
@@ -56,6 +56,9 @@ Some things to be aware of:
   On hosts with NVIDIA's driver, a few libraries from nix-appimage's nixpkgs also get loaded (see graphics/host-driver-deps.nix), which `mkAppImage.override { mkappimage-host-driver-deps = ...; }` can replace.
 - Programs that only use CUDA (rather than e.g. OpenGL) aren't detected, so need `graphics = true` to get access to the host's NVIDIA driver.
 - GPUs that are newer than the bundled Mesa may not be supported by it, in which case programs fall back to software rendering.
+- Hardware video decoding works through VA-API on Intel and AMD GPUs, and through NVDEC (CUDA), VDPAU or Vulkan with NVIDIA's driver.
+  Vulkan video decoding in the bundled Mesa (25.0) is only on by default for AMD GPUs from RDNA1 to RDNA3, and can be turned on for Intel GPUs with `ANV_VIDEO_DECODE=1`.
+  Programs like mpv try other methods when one doesn't work, so they may print errors about those before finding one that does.
 - To add `/run/opengl-driver`, AppRun gives the program its own read-only `/run` containing the host's `/run` entries as of startup (the directories in it are still writable as usual).
   Entries created directly in the host's `/run` after that (or sockets like `/run/docker.sock` that get recreated when their daemon restarts) aren't visible to the program until it's restarted, and the program can't create entries directly in `/run`.
 - Vulkan programs also see the host's Vulkan driver manifests (in `/usr/share/vulkan/icd.d`).
@@ -79,7 +82,8 @@ Running the bundled app this way (see AppRun below) has some side effects:
 - Mounts made by the app aren't visible outside it, and `/` itself is read-only.
 - The app gets the path of the bundled executable (e.g. `/nix/store/...-hello-2.12.1/bin/hello`) as `argv[0]`, rather than the AppImage's path, which is available as `$APPIMAGE` (and the original `argv[0]` as `$ARGV0`).
 
-The AppImage normally gets mounted using FUSE, which only lets the user that ran it access the bundled files.
+The AppImage normally gets mounted using FUSE, which for normal users needs a setuid `fusermount3` or `fusermount` (from either FUSE 3 or FUSE 2) on the `PATH`, which most distros have.
+FUSE only lets the user that ran the AppImage access the bundled files.
 So when run as root, apps that switch to another user can't access the bundled `/nix/store` anymore, unless the AppImage is run with `--appimage-extract-and-run` instead.
 That option (or setting `APPIMAGE_EXTRACT_AND_RUN=1`) is also how to run AppImages where FUSE isn't available (e.g. in containers).
 It extracts the AppImage to `$TMPDIR/appimage_extracted_<hash>_<uid>` (or `/tmp/...` if `TMPDIR` isn't set), which later runs reuse, and which isn't deleted afterwards.
@@ -100,12 +104,12 @@ The squashfs contains all the files needed to run the program:
   Unlike `LD_LIBRARY_PATH`, this only affects nix-built programs, and doesn't take priority over libraries found through RUNPATH.
 
 Runtimes are included within the flake as `legacyPackages.<system>.appimage-runtimes.<name>`.
-Currently supported are:
+Currently there's one:
 
 - `appimage-type2-runtime` (default)
-  This is [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime), a static runtime maintained by the official AppImage team.
-- `appimagecrafters`.
-  This is [AppImageCrafers/appimage-runtime](https://github.com/AppImageCrafters/appimage-runtime), a similar static runtime that was the old default for nix-appimage.
+  This is [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime), a static runtime maintained by the official AppImage team, with some fixes (see runtimes/appimage-type2-runtime/fixes.patch).
+
+`appimagecrafters` ([AppImageCrafters/appimage-runtime](https://github.com/AppImageCrafters/appimage-runtime), the old default) was removed, since it's no longer maintained.
 
 AppRuns are included within the flake as `legacyPackages.<system>.appimage-appruns.<name>`.
 Currently supported are:
