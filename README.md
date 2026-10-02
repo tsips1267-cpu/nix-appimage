@@ -82,7 +82,8 @@ Running the bundled app this way (see AppRun below) has some side effects:
 - Mounts made by the app aren't visible outside it, and `/` itself is read-only.
 - The app gets the path of the bundled executable (e.g. `/nix/store/...-hello-2.12.1/bin/hello`) as `argv[0]`, rather than the AppImage's path, which is available as `$APPIMAGE` (and the original `argv[0]` as `$ARGV0`).
 
-The AppImage normally gets mounted using FUSE, which only lets the user that ran it access the bundled files.
+The AppImage normally gets mounted using FUSE, which for normal users needs a setuid `fusermount3` or `fusermount` (from either FUSE 3 or FUSE 2) on the `PATH`, which most distros have.
+FUSE only lets the user that ran the AppImage access the bundled files.
 So when run as root, apps that switch to another user can't access the bundled `/nix/store` anymore, unless the AppImage is run with `--appimage-extract-and-run` instead.
 That option (or setting `APPIMAGE_EXTRACT_AND_RUN=1`) is also how to run AppImages where FUSE isn't available (e.g. in containers).
 It extracts the AppImage to `$TMPDIR/appimage_extracted_<hash>_<uid>` (or `/tmp/...` if `TMPDIR` isn't set), which later runs reuse, and which isn't deleted afterwards.

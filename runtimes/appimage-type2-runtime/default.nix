@@ -11,17 +11,20 @@
 }:
 
 let
+  rev = "8f39b89e2ac31e1640b3d3f7e9a5108e6ce805fa";
+
   src = fetchFromGitHub {
     owner = "AppImage";
     repo = "type2-runtime";
-    rev = "01164bfcbc8dd2bd0d7e3706f97035108d6b91ba";
-    hash = "sha256-GR3LMuWMSafQmc2RQyveue3sq+HYBtl+VkcZVYMS0CI=";
+    inherit rev;
+    hash = "sha256-+ffBk9lnMnVz4uq+FAYk0h/uMzkTVwfoPuMbT0twoFQ=";
   };
 
   fuse3' = fuse3.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [
-      # this doesn't work -- causes fuse: failed to exec fusermount: Permission denied
-      # "${src}/patches/libfuse/mount.c.diff"
+      # use the fusermount that the runtime finds (which may be fuse 2's
+      # fusermount, or in a different directory), via $FUSERMOUNT_PROG
+      "${src}/patches/libfuse/mount.c.diff"
     ];
   });
 
@@ -35,7 +38,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "appimage-type2-runtime";
-  version = "unstable-2024-08-17";
+  version = "unstable-2026-09-28";
 
   inherit src;
 
@@ -54,8 +57,6 @@ stdenv.mkDerivation {
     # fixes for the keepalive pipe, TMPDIR, --appimage-extract and
     # --appimage-extract-and-run
     patch -p1 < ${./fixes.patch}
-
-    sed -e '/sqfs_usage/s/);/, true\0/' -i src/runtime/runtime.c
   '';
 
   configurePhase = ''
@@ -64,7 +65,7 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     $CC src/runtime/runtime.c -o $out \
-      -D_FILE_OFFSET_BITS=64 -DGIT_COMMIT='"0000000"' \
+      -D_FILE_OFFSET_BITS=64 -DGIT_COMMIT='"${builtins.substring 0 7 rev}"' \
       $(cat cflags) \
       -std=gnu99 -Os -ffunction-sections -fdata-sections -Wl,--gc-sections -static -Wall -Werror \
       -lsquashfuse -lsquashfuse_ll -lfuse3 -lzstd -lz -llzma -llz4 -llzo2 \

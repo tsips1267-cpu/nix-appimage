@@ -1,6 +1,6 @@
 --- a/src/runtime/runtime.c
 +++ b/src/runtime/runtime.c
-@@ -480,6 +480,18 @@
+@@ -589,6 +589,18 @@
  static pid_t fuse_pid;
  static int keepalive_pipe[2];
  
@@ -19,7 +19,7 @@
  static void*
  write_pipe_thread(void* arg) {
      char c[32];
-@@ -633,7 +645,7 @@
+@@ -746,7 +758,7 @@
      sqfs_err err = SQFS_OK;
      sqfs_traverse trv;
      sqfs fs;
@@ -28,7 +28,7 @@
  
      // local copy we can modify safely
      // allocate 1 more byte than we would need so we can add a trailing slash if there is none yet
-@@ -684,8 +696,14 @@
+@@ -797,8 +809,14 @@
                  }
                  // fprintf(stderr, "inode.base.inode_type: %i\n", inode.base.inode_type);
                  // fprintf(stderr, "inode.xtra.reg.file_size: %lu\n", inode.xtra.reg.file_size);
@@ -45,14 +45,15 @@
  
                  if (verbose)
                      fprintf(stdout, "%s\n", prefixed_path_to_extract);
-@@ -700,12 +718,22 @@
+@@ -813,12 +831,23 @@
                              break;
                          }
                      }
 +                    // nix-appimage: for --appimage-extract-and-run, give
-+                    // directories their usual permissions whatever our umask is
-+                    // (also fixing earlier extractions), so that apps can still
-+                    // access them after switching to another user
++                    // directories their usual permissions rather than 0700
++                    // (mkdir_p's) or whatever our umask allows (also fixing
++                    // earlier extractions), so that apps can still access them
++                    // after switching to another user
 +                    if (!overwrite)
 +                        chmod(prefixed_path_to_extract, (inode.base.mode & 0755) | S_IRWXU);
                  } else if (inode.base.inode_type == SQUASHFS_REG_TYPE || inode.base.inode_type == SQUASHFS_LREG_TYPE) {
@@ -70,7 +71,7 @@
                              fprintf(stderr, "Couldn't create hardlink from \"%s\" to \"%s\": %s\n",
                                      prefixed_path_to_extract, existing_path_for_inode, strerror(errno));
                              rv = false;
-@@ -715,7 +743,7 @@
+@@ -828,7 +857,7 @@
                          }
                      } else {
                          struct stat st;
@@ -79,7 +80,7 @@
                              st.st_size == inode.xtra.reg.file_size) {
                              if (verbose) {
                                  fprintf(stderr, "File exists and file size matches, skipping\n");
-@@ -740,11 +768,41 @@
+@@ -853,11 +882,41 @@
                              *p = '/';
                          }
  
@@ -122,7 +123,7 @@
                          if (f == NULL) {
                              perror("fopen error");
                              rv = false;
-@@ -758,16 +816,38 @@
+@@ -871,16 +930,38 @@
                                  break;
                              }
                              // fwrite(buf, 1, bytes_at_a_time, stdout);
@@ -165,7 +166,7 @@
                          if (!rv)
                              break;
                      }
-@@ -783,10 +863,17 @@
+@@ -896,10 +977,17 @@
                          break;
                      }
                      // fprintf(stderr, "Symlink: %s to %s \n", prefixed_path_to_extract, buf);
@@ -187,7 +188,7 @@
                  } else {
                      fprintf(stderr, "TODO: Implement inode.base.inode_type %i\n", inode.base.inode_type);
                  }
-@@ -1354,8 +1441,10 @@
+@@ -1493,8 +1581,10 @@
  
      {
          const char* const TMPDIR = getenv("TMPDIR");
@@ -200,7 +201,7 @@
      }
  
      fs_offset = appimage_get_elf_size(appimage_path);
-@@ -1463,25 +1552,70 @@
+@@ -1600,23 +1690,68 @@
  
              MD5_HASH digest;
              Md5Finalise(&ctx, &digest);
@@ -240,8 +241,6 @@
 +            }
 +        }
 +
-         const bool verbose = (getenv("VERBOSE") != NULL);
- 
 +        // nix-appimage: don't leave a partially written temporary file behind
 +        // if we're interrupted (unless the signal is ignored, which the app
 +        // should then inherit)
@@ -277,7 +276,7 @@
              int error = errno;
              fprintf(stderr, "fork() failed: %s\n", strerror(error));
              exit(EXIT_EXECERROR);
-@@ -1493,7 +1627,9 @@
+@@ -1628,7 +1763,9 @@
              strcat(apprun_path, apprun_fname);
  
              // create copy of argument list without the --appimage-extract-and-run parameter
@@ -288,9 +287,9 @@
              int new_argc = 0;
              new_argv[new_argc++] = strdup(apprun_path);
              for (int i = 1; i < argc; ++i) {
-@@ -1508,6 +1644,9 @@
-             setenv("ARGV0", argv0_path, 1);
-             setenv("APPDIR", prefix, 1);
+@@ -1645,6 +1782,9 @@
+ 
+             set_portable_home_and_config(fullpath);
  
 +            // nix-appimage: exec would discard what's still buffered, e.g.
 +            // the end of VERBOSE's list of extracted files
@@ -298,7 +297,7 @@
              execv(apprun_path, new_argv);
  
              int error = errno;
-@@ -1586,6 +1725,16 @@
+@@ -1723,6 +1863,16 @@
          exit(EXIT_EXECERROR);
      }
  
@@ -315,7 +314,20 @@
      if (pipe(keepalive_pipe) == -1) {
          perror("pipe error");
          exit(EXIT_EXECERROR);
-@@ -1607,15 +1756,32 @@
+@@ -1746,8 +1896,10 @@
+                     fprintf(stderr, "FUSERMOUNT_PROG set to %s\n", new_prog);
+                 }
+                 free(new_prog);
+-            } else {
+-                printf("Error: No suitable fusermount binary found on the $PATH\n");
++            } else if (geteuid() != 0) {
++                // nix-appimage: on stderr, since this shares the app's stdout,
++                // and not for root, which can mount without fusermount
++                fprintf(stderr, "Error: No suitable fusermount binary found on the $PATH\n");
+             }
+         }
+ 
+@@ -1758,15 +1910,32 @@
  
          char* dir = realpath(appimage_path, NULL);
  
@@ -349,7 +361,7 @@
          if (0 != fusefs_main(5, child_argv, fuse_mounted)) {
              char* title;
              char* body;
-@@ -1637,6 +1803,13 @@
+@@ -1788,6 +1957,13 @@
          /* Pause until mounted */
          read(keepalive_pipe[0], &c, 1);
  
@@ -363,7 +375,7 @@
          /* Fuse process has now daemonized, reap our child */
          waitpid(pid, NULL, 0);
  
-@@ -1646,12 +1819,11 @@
+@@ -1797,12 +1973,11 @@
              exit(EXIT_EXECERROR);
          }
  
