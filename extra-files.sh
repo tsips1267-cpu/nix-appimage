@@ -17,6 +17,12 @@ fi
 
 drv="/nix/store/$hash"
 
+# prints the values of a key in the main group of a .desktop file (and not e.g.
+# in [Desktop Action ...] groups)
+desktop_key() {
+	sed -ne "/^\[Desktop Entry\]/,/^\[/{ s/^$1 *= *//p }" "$2"
+}
+
 # find desktop file
 
 desktop=
@@ -24,11 +30,12 @@ desktop=
 # try find one whose Exec= matches $program
 for d in "$drv/share/applications/"*.desktop; do
 	if ! [ -e "$d" ]; then
-		# if we don't match any files then it's whatever
-		break
+		# no .desktop files, or a dangling symlink
+		continue
 	fi
 
-	if sed -nEe '/^Exec=/{ s/^Exec= *([^ ]*).*$/\1/; s#.*/##; p }' "$d" |
+	# the basename of the executable, which may be quoted
+	if desktop_key Exec "$d" | sed -e 's/^"\([^"]*\)".*/\1/; t done' -e 's/ .*//' -e ':done' -e 's#.*/##' |
 		grep --fixed-strings --line-regexp --quiet "$(basename "$program")"
 	then
 		if [ -z "$desktop" ]; then
@@ -47,24 +54,51 @@ fi
 
 # copy desktop file and icons
 
-cp -L "$desktop" extras/
+cp -L --no-preserve=all "$desktop" extras/
 if [ -e "$drv/share/icons/hicolor" ]; then
 	mkdir -p extras/usr/share/icons
-	cp -Lr --no-preserve=all "$drv/share/icons/hicolor" extras/usr/share/icons
+	cp -Lr --no-preserve=all "$drv/share/icons/hicolor" extras/usr/share/icons ||
+		echo "couldn't copy some icons; continuing anyway" >&2
 fi
 
-# create DirIcon
+# create DirIcon, and an icon named after Icon= next to the .desktop file
 
-grep ^Icon= "$desktop" | while IFS="=" read -r _ icon; do
-	for size in 256x256 128x128 64x64 scalable; do
-		for f in "${drv}/share/icons/hicolor/$size/apps/${icon}".*; do
-			[ -e "$f" ] || continue
-
-			# .DirIcon SHOULD be a 256x256 PNG, and the app could have non-PNG
-			# icons, so ideally we'd use a tool like imagemagick to create it. But that's a big dependency, and this is close enough?
-
-			cp -Lr --no-preserve=all "$f" extras/.DirIcon
-			exit
+icon=$(desktop_key Icon "$desktop" | head -n 1)
+iconfile=
+case "$icon" in
+"") ;;
+/*)
+	# an absolute path, which tools like appimaged and AppImageLauncher don't
+	# support, so we use a name instead
+	if [ -f "$icon" ]; then
+		iconfile=$icon
+		icon=$(basename "$icon")
+		icon=${icon%.*}
+		sed -i -e "/^\[Desktop Entry\]/,/^\[/s|^Icon *=.*|Icon=$icon|" "extras/$(basename "$desktop")"
+	fi
+	;;
+*)
+	for dir in 256x256 512x512 1024x1024 192x192 128x128 96x96 64x64 48x48 scalable; do
+		for ext in png svg xpm; do
+			if [ -f "$drv/share/icons/hicolor/$dir/apps/$icon.$ext" ]; then
+				iconfile="$drv/share/icons/hicolor/$dir/apps/$icon.$ext"
+				break 2
+			fi
 		done
 	done
-done
+	for ext in png svg xpm; do
+		if [ -z "$iconfile" ] && [ -f "$drv/share/pixmaps/$icon.$ext" ]; then
+			iconfile="$drv/share/pixmaps/$icon.$ext"
+		fi
+	done
+	;;
+esac
+
+if [ -n "$iconfile" ]; then
+	# .DirIcon SHOULD be a 256x256 PNG, and the app could have non-PNG
+	# icons, so ideally we'd use a tool like imagemagick to create it. But that's a big dependency, and this is close enough?
+	cp -L --no-preserve=all "$iconfile" extras/.DirIcon
+	case "$iconfile" in
+	*.png | *.svg | *.xpm) cp -L --no-preserve=all "$iconfile" "extras/$icon.${iconfile##*.}" ;;
+	esac
+fi

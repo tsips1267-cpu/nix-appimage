@@ -19,7 +19,7 @@ let
   };
 
   fuse3' = fuse3.overrideAttrs (old: {
-    patches = (old.patches or []) ++ [
+    patches = (old.patches or [ ]) ++ [
       # this doesn't work -- causes fuse: failed to exec fusermount: Permission denied
       # "${src}/patches/libfuse/mount.c.diff"
     ];
@@ -51,6 +51,9 @@ stdenv.mkDerivation {
   ];
 
   patchPhase = ''
+    # fixes for the keepalive pipe, TMPDIR and --appimage-extract-and-run
+    patch -p1 < ${./fixes.patch}
+
     sed -e '/sqfs_usage/s/);/, true\0/' -i src/runtime/runtime.c
   '';
 

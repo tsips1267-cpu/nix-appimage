@@ -1,0 +1,212 @@
+--- a/src/runtime/runtime.c
++++ b/src/runtime/runtime.c
+@@ -704,8 +704,12 @@
+                     // if we've already created this inode, then this is a hardlink
+                     char* existing_path_for_inode = created_inode[inode.base.inode_number - 1];
+                     if (existing_path_for_inode != NULL) {
+-                        unlink(prefixed_path_to_extract);
+-                        if (link(existing_path_for_inode, prefixed_path_to_extract) == -1) {
++                        // nix-appimage: when not overwriting, keep what's already
++                        // there (see below)
++                        if (overwrite)
++                            unlink(prefixed_path_to_extract);
++                        if (link(existing_path_for_inode, prefixed_path_to_extract) == -1 &&
++                            (overwrite || errno != EEXIST)) {
+                             fprintf(stderr, "Couldn't create hardlink from \"%s\" to \"%s\": %s\n",
+                                     prefixed_path_to_extract, existing_path_for_inode, strerror(errno));
+                             rv = false;
+@@ -715,7 +719,7 @@
+                         }
+                     } else {
+                         struct stat st;
+-                        if (!overwrite && stat(prefixed_path_to_extract, &st) == 0 &&
++                        if (!overwrite && lstat(prefixed_path_to_extract, &st) == 0 && S_ISREG(st.st_mode) &&
+                             st.st_size == inode.xtra.reg.file_size) {
+                             if (verbose) {
+                                 fprintf(stderr, "File exists and file size matches, skipping\n");
+@@ -740,11 +744,24 @@
+                             *p = '/';
+                         }
+ 
++                        // nix-appimage: when not overwriting (i.e. for
++                        // --appimage-extract-and-run, which reuses earlier
++                        // extractions), write to a temporary file and rename it
++                        // into place, so that other instances of the app using
++                        // the same directory never see partially written files
++                        char tmp_path[sizeof(prefixed_path_to_extract) + 7];
++                        snprintf(tmp_path, sizeof(tmp_path), "%s.XXXXXX", prefixed_path_to_extract);
++
+                         // Read the file in chunks
+                         off_t bytes_already_read = 0;
+                         sqfs_off_t bytes_at_a_time = 64 * 1024;
+                         FILE* f;
+-                        f = fopen(prefixed_path_to_extract, "w+");
++                        if (overwrite) {
++                            f = fopen(prefixed_path_to_extract, "w+");
++                        } else {
++                            int tmp_fd = mkstemp(tmp_path);
++                            f = tmp_fd == -1 ? NULL : fdopen(tmp_fd, "w+");
++                        }
+                         if (f == NULL) {
+                             perror("fopen error");
+                             rv = false;
+@@ -758,16 +775,37 @@
+                                 break;
+                             }
+                             // fwrite(buf, 1, bytes_at_a_time, stdout);
+-                            fwrite(buf, 1, bytes_at_a_time, f);
++                            // nix-appimage: fail rather than leave a truncated
++                            // file when e.g. the disk is full
++                            if (fwrite(buf, 1, bytes_at_a_time, f) != (size_t) bytes_at_a_time) {
++                                perror("fwrite error");
++                                rv = false;
++                                break;
++                            }
+                             bytes_already_read = bytes_already_read + bytes_at_a_time;
+                         }
+-                        fflush(f);
++                        if (fflush(f) != 0 && rv) {
++                            perror("fflush error");
++                            rv = false;
++                        }
+                         int fd = fileno(f);
+                         struct timespec times[] = { st.st_atim, st.st_mtim };
+                         if (futimens(fd, times) != 0)
+                             fprintf(stderr, "futimens: %s\n", strerror(errno));
+-                        fclose(f);
+-                        chmod(prefixed_path_to_extract, st.st_mode);
++                        if (!overwrite)
++                            fchmod(fd, st.st_mode & 07777);
++                        if (fclose(f) != 0 && rv) {
++                            perror("fclose error");
++                            rv = false;
++                        }
++                        if (overwrite) {
++                            chmod(prefixed_path_to_extract, st.st_mode);
++                        } else if (!rv || rename(tmp_path, prefixed_path_to_extract) != 0) {
++                            if (rv)
++                                perror("rename error");
++                            unlink(tmp_path);
++                            rv = false;
++                        }
+                         if (!rv)
+                             break;
+                     }
+@@ -783,10 +821,17 @@
+                         break;
+                     }
+                     // fprintf(stderr, "Symlink: %s to %s \n", prefixed_path_to_extract, buf);
+-                    unlink(prefixed_path_to_extract);
+-                    ret = symlink(buf, prefixed_path_to_extract);
+-                    if (ret != 0)
+-                        fprintf(stderr, "WARNING: could not create symlink\n");
++                    // nix-appimage: when not overwriting, keep existing symlinks
++                    // rather than briefly removing them (see above)
++                    struct stat st;
++                    const bool exists = lstat(prefixed_path_to_extract, &st) == 0;
++                    if (overwrite || !exists || !S_ISLNK(st.st_mode)) {
++                        if (exists)
++                            unlink(prefixed_path_to_extract);
++                        ret = symlink(buf, prefixed_path_to_extract);
++                        if (ret != 0 && (overwrite || errno != EEXIST))
++                            fprintf(stderr, "WARNING: could not create symlink\n");
++                    }
+                 } else {
+                     fprintf(stderr, "TODO: Implement inode.base.inode_type %i\n", inode.base.inode_type);
+                 }
+@@ -1354,8 +1399,10 @@
+ 
+     {
+         const char* const TMPDIR = getenv("TMPDIR");
+-        if (TMPDIR != NULL)
+-            strcpy(temp_base, getenv("TMPDIR"));
++        // nix-appimage: like other programs, ignore TMPDIR if it's empty
++        // (rather than using /), or too long
++        if (TMPDIR != NULL && TMPDIR[0] != '\0' && strlen(TMPDIR) < sizeof(temp_base))
++            strcpy(temp_base, TMPDIR);
+     }
+ 
+     fs_offset = appimage_get_elf_size(appimage_path);
+@@ -1467,12 +1514,31 @@
+             hexlified_digest = appimage_hexlify((const char*)digest.bytes, sizeof(digest.bytes));
+         }
+ 
+-        char* prefix = malloc(strlen(temp_base) + 20 + strlen(hexlified_digest) + 2);
+-        strcpy(prefix, temp_base);
+-        strcat(prefix, "/appimage_extracted_");
+-        strcat(prefix, hexlified_digest);
++        // nix-appimage: anyone can create files in /tmp, so only use (and reuse)
++        // a directory that we created, otherwise someone else could make us run
++        // their files, or overwrite our files using symlinks. The name includes
++        // our uid so that other users running the same AppImage don't take it.
++        const uid_t euid = geteuid();
++        char* prefix = malloc(strlen(temp_base) + 20 + strlen(hexlified_digest) + 11 + 7 + 1);
++        sprintf(prefix, "%s/appimage_extracted_%s_%u", temp_base, hexlified_digest, (unsigned) euid);
+         free(hexlified_digest);
+ 
++        struct stat prefix_st;
++        if (mkdir(prefix, 0700) != 0 && errno != EEXIST) {
++            fprintf(stderr, "Failed to create %s: %s\n", prefix, strerror(errno));
++            exit(EXIT_EXECERROR);
++        }
++        if (lstat(prefix, &prefix_st) != 0 || !S_ISDIR(prefix_st.st_mode) || prefix_st.st_uid != euid ||
++            (prefix_st.st_mode & 022) != 0) {
++            fprintf(stderr, "%s isn't a directory that only you can write to, extracting to a new one instead\n",
++                    prefix);
++            strcat(prefix, ".XXXXXX");
++            if (mkdtemp(prefix) == NULL) {
++                fprintf(stderr, "Failed to create %s: %s\n", prefix, strerror(errno));
++                exit(EXIT_EXECERROR);
++            }
++        }
++
+         const bool verbose = (getenv("VERBOSE") != NULL);
+ 
+         if (!extract_appimage(appimage_path, prefix, NULL, false, verbose)) {
+@@ -1480,8 +1546,13 @@
+             exit(EXIT_EXECERROR);
+         }
+ 
+-        int pid;
+-        if ((pid = fork()) == -1) {
++        // nix-appimage: run AppRun in this process rather than a child, so that
++        // it gets our signals and its exit status (including dying from a
++        // signal) is ours. We'd only wait for it in order to clean up, which
++        // does nothing anyway: musl's nftw() does nothing when fd_limit is 0,
++        // and later runs reuse the extracted files.
++        int pid = 0;
++        if (pid == -1) {
+             int error = errno;
+             fprintf(stderr, "fork() failed: %s\n", strerror(error));
+             exit(EXIT_EXECERROR);
+@@ -1586,6 +1657,16 @@
+         exit(EXIT_EXECERROR);
+     }
+ 
++    // nix-appimage: make sure stdin/stdout/stderr are open, so the keepalive
++    // pipe doesn't end up as one of them: the app would read from it, and
++    // fuse_daemonize() replaces them with /dev/null in the FUSE process, which
++    // would then never notice the app exiting.
++    for (int fd = 0; fd < 3; fd++) {
++        if (fcntl(fd, F_GETFD) == -1) {
++            open("/dev/null", O_RDWR);
++        }
++    }
++
+     if (pipe(keepalive_pipe) == -1) {
+         perror("pipe error");
+         exit(EXIT_EXECERROR);
+@@ -1637,6 +1718,13 @@
+         /* Pause until mounted */
+         read(keepalive_pipe[0], &c, 1);
+ 
++        // nix-appimage: move the keepalive pipe out of the way, since the AppImage
++        // gets unmounted when it's closed, which the app could otherwise do by
++        // accident (e.g. a shell script doing `exec 3>file`)
++        if (keepalive_pipe[0] != 1022 && dup2(keepalive_pipe[0], 1022) != -1) {
++            close(keepalive_pipe[0]);
++        }
++
+         /* Fuse process has now daemonized, reap our child */
+         waitpid(pid, NULL, 0);
+ 
