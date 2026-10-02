@@ -39,7 +39,7 @@ in
 , graphicsDrivers ? mkappimage-graphics-drivers # packages that make up /run/opengl-driver, like hardware.graphics.{package,extraPackages} on NixOS
 
   # advanced appimage configuration
-, squashfsArgs ? [ ] # additional arguments to pass to mksquashfs
+, squashfsArgs ? [ ] # additional arguments (one per element) to pass to mksquashfs when it creates the image
 }:
 
 assert lib.assertOneOf "graphics" graphics [ true false "auto" ];
@@ -67,7 +67,7 @@ let
     # identical files (auto-optimise-store) or have SELinux labels
     "-no-hardlinks"
     "-no-xattrs"
-  ] ++ squashfsArgs;
+  ];
 
   # Workaround for writeClosure bug.
   #
@@ -202,7 +202,7 @@ runCommand name
     "-action-file actions"
 
     "-no-strip" # don't strip leading dirs, to preserve the fact that everything's in the nix store
-  ] ++ commonArgs)}
+  ] ++ commonArgs ++ map lib.escapeShellArg squashfsArgs)}
 
   # (as an array, since the .desktop file's name could contain spaces)
   shopt -s nullglob dotglob
@@ -212,6 +212,8 @@ runCommand name
   mksquashfs ${builtins.concatStringsSep " " ([
     # second run of mksquashfs adds the apprun
     # no -no-strip since we *do* want to strip leading dirs now
+    # no squashfsArgs, since appending takes compression options from the
+    # image, and e.g. pseudo files and excludes would be added again
     "${mkappimage-apprun}/*"
     ''"''${extras[@]}"''
     "$out"

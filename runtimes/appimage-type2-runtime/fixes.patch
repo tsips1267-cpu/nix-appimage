@@ -1,6 +1,25 @@
 --- a/src/runtime/runtime.c
 +++ b/src/runtime/runtime.c
-@@ -633,7 +633,7 @@
+@@ -480,6 +480,18 @@
+ static pid_t fuse_pid;
+ static int keepalive_pipe[2];
+ 
++// nix-appimage: the temporary file that --appimage-extract-and-run is currently
++// writing (see extract_appimage), so that it can be removed if we're interrupted
++static char extract_tmp_path[PATH_MAX + 20];
++static volatile sig_atomic_t extract_tmp_exists = 0;
++
++static void remove_extract_tmp_and_reraise(int sig) {
++    if (extract_tmp_exists)
++        unlink(extract_tmp_path);
++    signal(sig, SIG_DFL);
++    raise(sig);
++}
++
+ static void*
+ write_pipe_thread(void* arg) {
+     char c[32];
+@@ -633,7 +645,7 @@
      sqfs_err err = SQFS_OK;
      sqfs_traverse trv;
      sqfs fs;
@@ -9,7 +28,7 @@
  
      // local copy we can modify safely
      // allocate 1 more byte than we would need so we can add a trailing slash if there is none yet
-@@ -684,8 +684,14 @@
+@@ -684,8 +696,14 @@
                  }
                  // fprintf(stderr, "inode.base.inode_type: %i\n", inode.base.inode_type);
                  // fprintf(stderr, "inode.xtra.reg.file_size: %lu\n", inode.xtra.reg.file_size);
@@ -26,7 +45,17 @@
  
                  if (verbose)
                      fprintf(stdout, "%s\n", prefixed_path_to_extract);
-@@ -704,8 +710,12 @@
+@@ -700,12 +718,22 @@
+                             break;
+                         }
+                     }
++                    // nix-appimage: for --appimage-extract-and-run, give
++                    // directories their usual permissions whatever our umask is
++                    // (also fixing earlier extractions), so that apps can still
++                    // access them after switching to another user
++                    if (!overwrite)
++                        chmod(prefixed_path_to_extract, (inode.base.mode & 0755) | S_IRWXU);
+                 } else if (inode.base.inode_type == SQUASHFS_REG_TYPE || inode.base.inode_type == SQUASHFS_LREG_TYPE) {
                      // if we've already created this inode, then this is a hardlink
                      char* existing_path_for_inode = created_inode[inode.base.inode_number - 1];
                      if (existing_path_for_inode != NULL) {
@@ -41,7 +70,7 @@
                              fprintf(stderr, "Couldn't create hardlink from \"%s\" to \"%s\": %s\n",
                                      prefixed_path_to_extract, existing_path_for_inode, strerror(errno));
                              rv = false;
-@@ -715,7 +725,7 @@
+@@ -715,7 +743,7 @@
                          }
                      } else {
                          struct stat st;
@@ -50,7 +79,7 @@
                              st.st_size == inode.xtra.reg.file_size) {
                              if (verbose) {
                                  fprintf(stderr, "File exists and file size matches, skipping\n");
-@@ -740,11 +750,31 @@
+@@ -740,11 +768,41 @@
                              *p = '/';
                          }
  
@@ -61,8 +90,8 @@
 +                        // the same directory never see partially written files.
 +                        // The temporary file's name doesn't include the file's
 +                        // own, which could already be as long as names can be.
-+                        char tmp_path[sizeof(prefixed_path_to_extract) + 20];
-+                        snprintf(tmp_path, sizeof(tmp_path), "%.*s/.nix-appimage.XXXXXX",
++                        char* const tmp_path = extract_tmp_path;
++                        snprintf(tmp_path, sizeof(extract_tmp_path), "%.*s/.nix-appimage.XXXXXX",
 +                                 (int) (p - prefixed_path_to_extract), prefixed_path_to_extract);
 +
                          // Read the file in chunks
@@ -77,13 +106,23 @@
 +                            unlink(prefixed_path_to_extract);
 +                            f = fopen(prefixed_path_to_extract, "w+");
 +                        } else {
++                            // (with the signals that remove it blocked, so it
++                            // can't be created without being recorded)
++                            sigset_t block, old_mask;
++                            sigemptyset(&block);
++                            sigaddset(&block, SIGINT);
++                            sigaddset(&block, SIGTERM);
++                            sigaddset(&block, SIGHUP);
++                            sigprocmask(SIG_BLOCK, &block, &old_mask);
 +                            int tmp_fd = mkstemp(tmp_path);
++                            extract_tmp_exists = tmp_fd != -1;
++                            sigprocmask(SIG_SETMASK, &old_mask, NULL);
 +                            f = tmp_fd == -1 ? NULL : fdopen(tmp_fd, "w+");
 +                        }
                          if (f == NULL) {
                              perror("fopen error");
                              rv = false;
-@@ -758,16 +788,37 @@
+@@ -758,16 +816,38 @@
                                  break;
                              }
                              // fwrite(buf, 1, bytes_at_a_time, stdout);
@@ -122,10 +161,11 @@
 +                            unlink(tmp_path);
 +                            rv = false;
 +                        }
++                        extract_tmp_exists = 0;
                          if (!rv)
                              break;
                      }
-@@ -783,10 +834,17 @@
+@@ -783,10 +863,17 @@
                          break;
                      }
                      // fprintf(stderr, "Symlink: %s to %s \n", prefixed_path_to_extract, buf);
@@ -147,7 +187,7 @@
                  } else {
                      fprintf(stderr, "TODO: Implement inode.base.inode_type %i\n", inode.base.inode_type);
                  }
-@@ -1354,8 +1412,10 @@
+@@ -1354,8 +1441,10 @@
  
      {
          const char* const TMPDIR = getenv("TMPDIR");
@@ -160,7 +200,14 @@
      }
  
      fs_offset = appimage_get_elf_size(appimage_path);
-@@ -1467,12 +1527,31 @@
+@@ -1463,25 +1552,70 @@
+ 
+             MD5_HASH digest;
+             Md5Finalise(&ctx, &digest);
++            // nix-appimage: don't leak it to the app (where it'd be stdin if
++            // that was closed)
++            fclose(f);
+ 
              hexlified_digest = appimage_hexlify((const char*)digest.bytes, sizeof(digest.bytes));
          }
  
@@ -195,13 +242,31 @@
 +
          const bool verbose = (getenv("VERBOSE") != NULL);
  
++        // nix-appimage: don't leave a partially written temporary file behind
++        // if we're interrupted (unless the signal is ignored, which the app
++        // should then inherit)
++        const int cleanup_signals[] = { SIGINT, SIGTERM, SIGHUP };
++        struct sigaction old_actions[3];
++        for (int i = 0; i < 3; i++) {
++            struct sigaction cleanup;
++            memset(&cleanup, 0, sizeof(cleanup));
++            cleanup.sa_handler = remove_extract_tmp_and_reraise;
++            sigemptyset(&cleanup.sa_mask);
++            sigaction(cleanup_signals[i], NULL, &old_actions[i]);
++            if (old_actions[i].sa_handler != SIG_IGN)
++                sigaction(cleanup_signals[i], &cleanup, NULL);
++        }
++
          if (!extract_appimage(appimage_path, prefix, NULL, false, verbose)) {
-@@ -1480,8 +1559,13 @@
+             fprintf(stderr, "Failed to extract AppImage\n");
              exit(EXIT_EXECERROR);
          }
  
 -        int pid;
 -        if ((pid = fork()) == -1) {
++        for (int i = 0; i < 3; i++)
++            sigaction(cleanup_signals[i], &old_actions[i], NULL);
++
 +        // nix-appimage: run AppRun in this process rather than a child, so that
 +        // it gets our signals and its exit status (including dying from a
 +        // signal) is ours. We'd only wait for it in order to clean up, which
@@ -212,7 +277,7 @@
              int error = errno;
              fprintf(stderr, "fork() failed: %s\n", strerror(error));
              exit(EXIT_EXECERROR);
-@@ -1493,7 +1577,9 @@
+@@ -1493,7 +1627,9 @@
              strcat(apprun_path, apprun_fname);
  
              // create copy of argument list without the --appimage-extract-and-run parameter
@@ -223,7 +288,17 @@
              int new_argc = 0;
              new_argv[new_argc++] = strdup(apprun_path);
              for (int i = 1; i < argc; ++i) {
-@@ -1586,6 +1672,16 @@
+@@ -1508,6 +1644,9 @@
+             setenv("ARGV0", argv0_path, 1);
+             setenv("APPDIR", prefix, 1);
+ 
++            // nix-appimage: exec would discard what's still buffered, e.g.
++            // the end of VERBOSE's list of extracted files
++            fflush(NULL);
+             execv(apprun_path, new_argv);
+ 
+             int error = errno;
+@@ -1586,6 +1725,16 @@
          exit(EXIT_EXECERROR);
      }
  
@@ -240,7 +315,41 @@
      if (pipe(keepalive_pipe) == -1) {
          perror("pipe error");
          exit(EXIT_EXECERROR);
-@@ -1637,6 +1733,13 @@
+@@ -1607,15 +1756,32 @@
+ 
+         char* dir = realpath(appimage_path, NULL);
+ 
++        // nix-appimage: libfuse passes the basename of argv[0] on as an -o
++        // option without escaping it, so commas would make mounting fail
++        char* progname = strdup(dir);
++        for (char* c = progname; *c != '\0'; c++) {
++            if (*c == ',')
++                *c = '_';
++        }
++
+         char options[100];
+         sprintf(options, "ro,offset=%zu", fs_offset);
+ 
+-        child_argv[0] = dir;
++        child_argv[0] = progname;
+         child_argv[1] = "-o";
+         child_argv[2] = options;
+         child_argv[3] = dir;
+         child_argv[4] = mount_dir;
+ 
++        // nix-appimage: we're unmounted by write_pipe_thread sending us
++        // SIGTERM, which libfuse doesn't handle if it's ignored, and which
++        // can't arrive if it's blocked (both of which we could have inherited)
++        signal(SIGTERM, SIG_DFL);
++        sigset_t sigterm;
++        sigemptyset(&sigterm);
++        sigaddset(&sigterm, SIGTERM);
++        sigprocmask(SIG_UNBLOCK, &sigterm, NULL);
++
+         if (0 != fusefs_main(5, child_argv, fuse_mounted)) {
+             char* title;
+             char* body;
+@@ -1637,6 +1803,13 @@
          /* Pause until mounted */
          read(keepalive_pipe[0], &c, 1);
  
@@ -254,3 +363,20 @@
          /* Fuse process has now daemonized, reap our child */
          waitpid(pid, NULL, 0);
  
+@@ -1646,12 +1819,11 @@
+             exit(EXIT_EXECERROR);
+         }
+ 
++        // nix-appimage: keep it where it is if fd 1023 is beyond our fd limit,
++        // rather than failing
+         res = dup2(dir_fd, 1023);
+-        if (res == -1) {
+-            perror("dup2 error");
+-            exit(EXIT_EXECERROR);
+-        }
+-        close(dir_fd);
++        if (res != -1)
++            close(dir_fd);
+ 
+         real_argv = malloc(sizeof(char*) * (argc + 1));
+         for (i = 0; i < argc; i++) {

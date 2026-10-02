@@ -97,7 +97,11 @@
                 touch $out/${pkgs.lib.strings.replicate 255 "x"}
                 cat > $out/bin/extract-test <<EOF
                 #!${pkgs.runtimeShell}
-                printf '<%s>' "\$@"
+                if [ "\$1" = --stdin ]; then
+                  ${pkgs.coreutils}/bin/readlink /proc/self/fd/0 2>/dev/null || echo closed
+                else
+                  printf '<%s>' "\$@"
+                fi
                 EOF
                 chmod +x $out/bin/extract-test
               ''}/bin/extract-test";
@@ -133,6 +137,13 @@
 
             extraction-works = pkgs.runCommand "check-extraction-works" { } ''
               export HOME=$TMPDIR
+              # extracted directories can be accessed by other users (e.g. if
+              # the app switches to one), whatever our umask is
+              (umask 077 && ${extract-appimage} --appimage-extract-and-run > /dev/null)
+              [ "$(stat -c %a $TMPDIR/appimage_extracted_*/nix/store)" = 755 ]
+              # the AppImage isn't left open, which would be the app's stdin
+              # if that was closed
+              [ "$(${extract-appimage} --appimage-extract-and-run --stdin <&-)" = closed ]
               # extract-and-run passes on the other arguments, whether it's
               # asked for with the option or APPIMAGE_EXTRACT_AND_RUN=1
               [ "$(${extract-appimage} --appimage-extract-and-run a "b c")" = "<a><b c>" ]

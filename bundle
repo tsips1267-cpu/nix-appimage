@@ -32,20 +32,26 @@ case "$1" in
 esac
 
 NA_EXE="$2"
+NA_OUTPUT=default
 if [ "${NA_EXE#/}" = "$NA_EXE" ]; then
 	# ${NA_EXE#/} = remove / from the start of NA_EXE
 	NA_EXE="/bin/$NA_EXE"
+	# like lib.getExe, use the output with the package's binaries, which isn't
+	# always the default one (e.g. wayland-scanner)
+	NA_OUTPUT=bin
 fi
 
-export NA_EXE
+export NA_EXE NA_OUTPUT
 # use an absolute path, since a relative one like nix-appimage would be taken as
 # a flake registry name
 nix bundle --impure --bundler "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)" \
 	--expr '
 	let
-		p = with import <nixpkgs> {}; '"$1"';
+		pkgs = import <nixpkgs> {};
+		p = with pkgs; '"$1"';
+		base = if builtins.getEnv "NA_OUTPUT" == "bin" && builtins.isAttrs p then pkgs.lib.getBin p else p;
 	in {
 		type = "app";
-		program = "${p}${builtins.getEnv "NA_EXE"}";
+		program = "${base}${builtins.getEnv "NA_EXE"}";
 	}
 	'
