@@ -87,6 +87,21 @@
                 unshare --user --map-root-user true
               '');
             };
+
+            # checks extracting files from the nix store (which are read-only),
+            # with names as long as they can be
+            extract-appimage = lib.mkAppImage {
+              pname = "extract-test";
+              program = "${pkgs.runCommand "extract-test" { } ''
+                mkdir -p $out/bin
+                touch $out/${pkgs.lib.strings.replicate 255 "x"}
+                cat > $out/bin/extract-test <<EOF
+                #!${pkgs.runtimeShell}
+                printf '<%s>' "\$@"
+                EOF
+                chmod +x $out/bin/extract-test
+              ''}/bin/extract-test";
+            };
           in
           {
             hello-is-static = pkgs.runCommand "check-hello-is-static"
@@ -113,6 +128,19 @@
 
             namespaces-work = pkgs.runCommand "check-namespaces-work" { } ''
               HOME=$TMPDIR ${namespaces-appimage} --appimage-extract-and-run "$(id -u):$(id -g)"
+              touch $out
+            '';
+
+            extraction-works = pkgs.runCommand "check-extraction-works" { } ''
+              export HOME=$TMPDIR
+              # extract-and-run passes on the other arguments, whether it's
+              # asked for with the option or APPIMAGE_EXTRACT_AND_RUN=1
+              [ "$(${extract-appimage} --appimage-extract-and-run a "b c")" = "<a><b c>" ]
+              [ "$(APPIMAGE_EXTRACT_AND_RUN=1 ${extract-appimage} a "b c")" = "<a><b c>" ]
+              # extracting again replaces the existing files
+              ${extract-appimage} --appimage-extract > /dev/null
+              ${extract-appimage} --appimage-extract > /dev/null
+              [ "$(squashfs-root/AppRun a)" = "<a>" ]
               touch $out
             '';
 

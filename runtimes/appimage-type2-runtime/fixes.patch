@@ -1,6 +1,32 @@
 --- a/src/runtime/runtime.c
 +++ b/src/runtime/runtime.c
-@@ -704,8 +704,12 @@
+@@ -633,7 +633,7 @@
+     sqfs_err err = SQFS_OK;
+     sqfs_traverse trv;
+     sqfs fs;
+-    char prefixed_path_to_extract[1024];
++    char prefixed_path_to_extract[PATH_MAX];
+ 
+     // local copy we can modify safely
+     // allocate 1 more byte than we would need so we can add a trailing slash if there is none yet
+@@ -684,8 +684,14 @@
+                 }
+                 // fprintf(stderr, "inode.base.inode_type: %i\n", inode.base.inode_type);
+                 // fprintf(stderr, "inode.xtra.reg.file_size: %lu\n", inode.xtra.reg.file_size);
+-                strcpy(prefixed_path_to_extract, "");
+-                strcat(strcat(prefixed_path_to_extract, prefix), trv.path);
++                // nix-appimage: fail rather than overflow the buffer when the
++                // path is too long (e.g. because of a long TMPDIR)
++                if (snprintf(prefixed_path_to_extract, sizeof(prefixed_path_to_extract), "%s%s", prefix,
++                             trv.path) >= (int) sizeof(prefixed_path_to_extract)) {
++                    fprintf(stderr, "Path too long: %s%s\n", prefix, trv.path);
++                    rv = false;
++                    break;
++                }
+ 
+                 if (verbose)
+                     fprintf(stdout, "%s\n", prefixed_path_to_extract);
+@@ -704,8 +710,12 @@
                      // if we've already created this inode, then this is a hardlink
                      char* existing_path_for_inode = created_inode[inode.base.inode_number - 1];
                      if (existing_path_for_inode != NULL) {
@@ -15,7 +41,7 @@
                              fprintf(stderr, "Couldn't create hardlink from \"%s\" to \"%s\": %s\n",
                                      prefixed_path_to_extract, existing_path_for_inode, strerror(errno));
                              rv = false;
-@@ -715,7 +719,7 @@
+@@ -715,7 +725,7 @@
                          }
                      } else {
                          struct stat st;
@@ -24,7 +50,7 @@
                              st.st_size == inode.xtra.reg.file_size) {
                              if (verbose) {
                                  fprintf(stderr, "File exists and file size matches, skipping\n");
-@@ -740,11 +744,24 @@
+@@ -740,11 +750,31 @@
                              *p = '/';
                          }
  
@@ -32,9 +58,12 @@
 +                        // --appimage-extract-and-run, which reuses earlier
 +                        // extractions), write to a temporary file and rename it
 +                        // into place, so that other instances of the app using
-+                        // the same directory never see partially written files
-+                        char tmp_path[sizeof(prefixed_path_to_extract) + 7];
-+                        snprintf(tmp_path, sizeof(tmp_path), "%s.XXXXXX", prefixed_path_to_extract);
++                        // the same directory never see partially written files.
++                        // The temporary file's name doesn't include the file's
++                        // own, which could already be as long as names can be.
++                        char tmp_path[sizeof(prefixed_path_to_extract) + 20];
++                        snprintf(tmp_path, sizeof(tmp_path), "%.*s/.nix-appimage.XXXXXX",
++                                 (int) (p - prefixed_path_to_extract), prefixed_path_to_extract);
 +
                          // Read the file in chunks
                          off_t bytes_already_read = 0;
@@ -42,6 +71,10 @@
                          FILE* f;
 -                        f = fopen(prefixed_path_to_extract, "w+");
 +                        if (overwrite) {
++                            // nix-appimage: replace existing files rather than
++                            // writing to them, since they're read-only if they
++                            // came from the nix store (and could be symlinks)
++                            unlink(prefixed_path_to_extract);
 +                            f = fopen(prefixed_path_to_extract, "w+");
 +                        } else {
 +                            int tmp_fd = mkstemp(tmp_path);
@@ -50,7 +83,7 @@
                          if (f == NULL) {
                              perror("fopen error");
                              rv = false;
-@@ -758,16 +775,37 @@
+@@ -758,16 +788,37 @@
                                  break;
                              }
                              // fwrite(buf, 1, bytes_at_a_time, stdout);
@@ -92,7 +125,7 @@
                          if (!rv)
                              break;
                      }
-@@ -783,10 +821,17 @@
+@@ -783,10 +834,17 @@
                          break;
                      }
                      // fprintf(stderr, "Symlink: %s to %s \n", prefixed_path_to_extract, buf);
@@ -114,7 +147,7 @@
                  } else {
                      fprintf(stderr, "TODO: Implement inode.base.inode_type %i\n", inode.base.inode_type);
                  }
-@@ -1354,8 +1399,10 @@
+@@ -1354,8 +1412,10 @@
  
      {
          const char* const TMPDIR = getenv("TMPDIR");
@@ -127,7 +160,7 @@
      }
  
      fs_offset = appimage_get_elf_size(appimage_path);
-@@ -1467,12 +1514,31 @@
+@@ -1467,12 +1527,31 @@
              hexlified_digest = appimage_hexlify((const char*)digest.bytes, sizeof(digest.bytes));
          }
  
@@ -163,7 +196,7 @@
          const bool verbose = (getenv("VERBOSE") != NULL);
  
          if (!extract_appimage(appimage_path, prefix, NULL, false, verbose)) {
-@@ -1480,8 +1546,13 @@
+@@ -1480,8 +1559,13 @@
              exit(EXIT_EXECERROR);
          }
  
@@ -179,7 +212,18 @@
              int error = errno;
              fprintf(stderr, "fork() failed: %s\n", strerror(error));
              exit(EXIT_EXECERROR);
-@@ -1586,6 +1657,16 @@
+@@ -1493,7 +1577,9 @@
+             strcat(apprun_path, apprun_fname);
+ 
+             // create copy of argument list without the --appimage-extract-and-run parameter
+-            char* new_argv[argc];
++            // nix-appimage: with room for the terminating NULL even when
++            // there's nothing to remove (i.e. with APPIMAGE_EXTRACT_AND_RUN=1)
++            char* new_argv[argc + 1];
+             int new_argc = 0;
+             new_argv[new_argc++] = strdup(apprun_path);
+             for (int i = 1; i < argc; ++i) {
+@@ -1586,6 +1672,16 @@
          exit(EXIT_EXECERROR);
      }
  
@@ -196,7 +240,7 @@
      if (pipe(keepalive_pipe) == -1) {
          perror("pipe error");
          exit(EXIT_EXECERROR);
-@@ -1637,6 +1718,13 @@
+@@ -1637,6 +1733,13 @@
          /* Pause until mounted */
          read(keepalive_pipe[0], &c, 1);
  

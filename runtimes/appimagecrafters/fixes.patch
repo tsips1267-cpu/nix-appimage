@@ -1,0 +1,39 @@
+--- a/src/main.c
++++ b/src/main.c
+@@ -553,7 +553,7 @@
+     sqfs_err err = SQFS_OK;
+     sqfs_traverse trv;
+     sqfs fs;
+-    char prefixed_path_to_extract[1024];
++    char prefixed_path_to_extract[PATH_MAX];
+ 
+     // local copy we can modify safely
+     // allocate 1 more byte than we would need so we can add a trailing slash if there is none yet
+@@ -604,8 +604,14 @@
+                 }
+                 // fprintf(stderr, "inode.base.inode_type: %i\n", inode.base.inode_type);
+                 // fprintf(stderr, "inode.xtra.reg.file_size: %lu\n", inode.xtra.reg.file_size);
+-                strcpy(prefixed_path_to_extract, "");
+-                strcat(strcat(prefixed_path_to_extract, prefix), trv.path);
++                // nix-appimage: fail rather than overflow the buffer when the
++                // path is too long (e.g. because of a long TMPDIR)
++                if (snprintf(prefixed_path_to_extract, sizeof(prefixed_path_to_extract), "%s%s", prefix,
++                             trv.path) >= (int) sizeof(prefixed_path_to_extract)) {
++                    fprintf(stderr, "Path too long: %s%s\n", prefix, trv.path);
++                    rv = false;
++                    break;
++                }
+ 
+                 if (verbose)
+                     fprintf(stdout, "%s\n", prefixed_path_to_extract);
+@@ -1393,7 +1399,9 @@
+             strcat(apprun_path, apprun_fname);
+ 
+             // create copy of argument list without the --appimage-extract-and-run parameter
+-            char* new_argv[argc];
++            // nix-appimage: with room for the terminating NULL even when
++            // there's nothing to remove (i.e. with APPIMAGE_EXTRACT_AND_RUN=1)
++            char* new_argv[argc + 1];
+             int new_argc = 0;
+             new_argv[new_argc++] = strdup(apprun_path);
+             for (int i = 1; i < argc; ++i) {

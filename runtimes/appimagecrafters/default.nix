@@ -39,7 +39,10 @@ stdenv.mkDerivation {
   patches = [
     # basename() patch from
     # https://github.com/AppImageCrafters/appimage-runtime/pull/14/commits/23f655a9313a6b962e072f12534982b925ecb8f7
-    ./basename.patch 
+    ./basename.patch
+
+    # fixes for buffer overflows with APPIMAGE_EXTRACT_AND_RUN and long paths
+    ./fixes.patch
   ];
 
   configurePhase = ''
