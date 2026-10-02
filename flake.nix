@@ -40,7 +40,14 @@
         lib.mkAppImage = pkgs.callPackage ./mkAppImage.nix {
           mkappimage-runtime = legacyPackages.appimage-runtimes.appimage-type2-runtime;
           mkappimage-apprun = legacyPackages.appimage-appruns.userns-chroot;
-          mkappimage-graphics-drivers = [ pkgsDynamic.mesa ];
+          # Mesa's VA-API (video decoding) drivers only cover AMD and Nouveau,
+          # so add Intel's, otherwise libva falls back to the host's, which
+          # can't find their dependencies
+          mkappimage-graphics-drivers = [ pkgsDynamic.mesa ]
+            ++ pkgsDynamic.lib.optionals pkgsDynamic.stdenv.hostPlatform.isx86 [
+            pkgsDynamic.intel-media-driver # iHD, for Broadwell and newer
+            pkgsDynamic.intel-vaapi-driver # i965, for older GPUs
+          ];
           mkappimage-host-driver-deps = packages.appimage-host-driver-deps;
         };
 
@@ -69,10 +76,18 @@
               pname = "graphics-test";
               program = toString (pkgs.writeShellScript "graphics-test" ''
                 set -eux
-                export PATH=${pkgs.lib.makeBinPath [ pkgs.mesa-demos pkgs.vulkan-tools pkgs.gnugrep ]}
+                export PATH=${pkgs.lib.makeBinPath [ pkgs.mesa-demos pkgs.vulkan-tools pkgs.gnugrep (pkgs.lib.getBin pkgs.stdenv.cc.libc) ]}
                 glxinfo -B | grep "OpenGL renderer string: llvmpipe"
                 eglinfo -B | grep "OpenGL core profile renderer: llvmpipe"
                 vulkaninfo --summary | grep "driverName *= llvmpipe"
+                # VA-API drivers (which need a GPU to actually use) can be loaded
+                for driver in /run/opengl-driver/lib/dri/*_drv_video.so; do
+                  if ldd "$driver" | grep "not found"; then exit 1; fi
+                done
+                ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isx86 ''
+                  [ -e /run/opengl-driver/lib/dri/iHD_drv_video.so ]
+                  [ -e /run/opengl-driver/lib/dri/i965_drv_video.so ]
+                ''}
               '');
             };
 

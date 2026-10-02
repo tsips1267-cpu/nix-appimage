@@ -37,17 +37,17 @@ See mkAppImage.nix for details.
 Programs that use the GPU work out of the box on other distros, without needing something like [nixGL](https://github.com/guibou/nixGL).
 
 Normally this is a [known problem](https://github.com/NixOS/nixpkgs/issues/9415): nix-built programs look for GPU drivers in `/run/opengl-driver`, which only exists on NixOS.
-To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering), and AppRun provides it to the bundled program at `/run/opengl-driver`.
+To fix this, nix-appimage bundles [Mesa](https://mesa3d.org/) (which supports Intel, AMD, Nouveau, virtual GPUs and software rendering) and, on x86_64, Intel's VA-API video decoding drivers (Mesa's only cover AMD and Nouveau), and AppRun provides them to the bundled program at `/run/opengl-driver`.
 NVIDIA's proprietary driver can't be bundled, since it has to match the host's kernel module, so if the host has it installed, AppRun makes the host's NVIDIA libraries available to the bundled program as well.
 The bundled drivers are used even if the host has its own `/run/opengl-driver` (i.e. on NixOS), since that points into the host's `/nix/store`, which the AppImage replaces with its own.
 This also means that on NixOS, the host's NVIDIA driver can't be used.
 
-By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan, GBM, VA-API or VDPAU (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, libva, etc), since they add roughly 100-150MB to the AppImage.
+By default, drivers are only bundled if the program uses OpenGL, EGL, Vulkan, GBM, VA-API or VDPAU (i.e. its closure contains libGL, libEGL, libvulkan, libgbm, libva, etc), since they add roughly 150-180MB to the AppImage.
 Note that determining this still requires downloading the drivers when building.
 `mkAppImage` has options to control this:
 
 - `graphics`: `"auto"` (the default) to detect whether the program needs drivers, or `true`/`false` to always/never bundle them.
-- `graphicsDrivers`: the packages that make up `/run/opengl-driver`, like `hardware.graphics.package` and `hardware.graphics.extraPackages` on NixOS. Defaults to `[ mesa ]` from nix-appimage's nixpkgs.
+- `graphicsDrivers`: the packages that make up `/run/opengl-driver`, like `hardware.graphics.package` and `hardware.graphics.extraPackages` on NixOS. Defaults to `[ mesa ]` from nix-appimage's nixpkgs, plus `intel-media-driver` and `intel-vaapi-driver` on x86_64.
 
 Some things to be aware of:
 
@@ -56,6 +56,9 @@ Some things to be aware of:
   On hosts with NVIDIA's driver, a few libraries from nix-appimage's nixpkgs also get loaded (see graphics/host-driver-deps.nix), which `mkAppImage.override { mkappimage-host-driver-deps = ...; }` can replace.
 - Programs that only use CUDA (rather than e.g. OpenGL) aren't detected, so need `graphics = true` to get access to the host's NVIDIA driver.
 - GPUs that are newer than the bundled Mesa may not be supported by it, in which case programs fall back to software rendering.
+- Hardware video decoding works through VA-API on Intel and AMD GPUs, and through NVDEC (CUDA), VDPAU or Vulkan with NVIDIA's driver.
+  Vulkan video decoding in the bundled Mesa (25.0) is only on by default for AMD GPUs from RDNA1 to RDNA3, and can be turned on for Intel GPUs with `ANV_VIDEO_DECODE=1`.
+  Programs like mpv try other methods when one doesn't work, so they may print errors about those before finding one that does.
 - To add `/run/opengl-driver`, AppRun gives the program its own read-only `/run` containing the host's `/run` entries as of startup (the directories in it are still writable as usual).
   Entries created directly in the host's `/run` after that (or sockets like `/run/docker.sock` that get recreated when their daemon restarts) aren't visible to the program until it's restarted, and the program can't create entries directly in `/run`.
 - Vulkan programs also see the host's Vulkan driver manifests (in `/usr/share/vulkan/icd.d`).
